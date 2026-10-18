@@ -1,0 +1,690 @@
+#!/usr/bin/env bash
+# bin/agent-sandbox — Generic Bubblewrap sandbox runner for AI coding agents
+# Supports multi-account profile isolation across:
+#   - antigravity (agy, antigravity)
+#   - claude (claude, claude-code)
+#   - codex (codex)
+#   - opencode (opencode)
+#   - opencode2 (opencode2, opencode-v2)
+#   - pi (pi)
+#   - orca (orca)
+#
+# Usage:
+#   agent-sandbox <agent> --list-profile
+#   agent-sandbox <agent> --profile <profile_name> [agent args...]
+#   agent-sandbox <agent> [agent args...]  (runs agent directly on host)
+#   agent-sandbox --list-profile           (lists profiles across all agents)
+#
+set -euo pipefail
+
+# Determine base directory for storing agent profiles
+if [ -n "${AGENT_SANDBOX_BASE:-}" ]; then
+  SANDBOX_BASE="$AGENT_SANDBOX_BASE"
+elif [ -d "/opt/config/agent-sandbox" ]; then
+  SANDBOX_BASE="/opt/config/agent-sandbox"
+elif [ -d "/opt/config" ] && [ -w "/opt/config" ]; then
+  SANDBOX_BASE="/opt/config/agent-sandbox"
+elif [ -n "${XDG_DATA_HOME:-}" ]; then
+  SANDBOX_BASE="${XDG_DATA_HOME}/agent-sandbox"
+else
+  SANDBOX_BASE="${HOME}/.local/share/agent-sandbox"
+fi
+
+OWNER="${AGENT_SANDBOX_OWNER:-${USER:-$(id -un 2>/dev/null || echo "user")}}"
+
+# ------------------------------------------------------------------------------
+# Usage & Help
+# ------------------------------------------------------------------------------
+usage() {
+  cat <<'EOF'
+agent-sandbox — Isolated profile sandbox runner for AI coding agents
+
+USAGE:
+  agent-sandbox <agent> --list-profile
+      List existing profiles and status for the specified agent.
+
+  agent-sandbox <agent> --profile <profile_name> [args...]
+      Launch the agent inside an isolated Bubblewrap sandbox under
+      <sandbox_base>/<agent>/<profile_name>.
+
+  agent-sandbox <agent> [args...]
+      Run the agent command directly on the host (passes through all arguments).
+
+  agent-sandbox --list-profile
+      List profiles across all supported agents.
+
+SUPPORTED AGENTS & ALIASES:
+  antigravity, agy    -> Google Antigravity CLI
+  claude, claude-code -> Anthropic Claude Code
+  codex               -> OpenAI Codex CLI
+  opencode            -> OpenCode AI
+  opencode2           -> OpenCode 2
+  pi                  -> Pi Coding Agent
+  orca                -> Orca ADE
+
+ENVIRONMENT VARIABLES:
+  AGENT_SANDBOX_BASE    Base directory for profiles (default: /opt/config/agent-sandbox or ~/.local/share/agent-sandbox)
+  AGENT_SANDBOX_OWNER   Primary user name (default: current user)
+
+EXAMPLES:
+  agent-sandbox claude --list-profile
+  agent-sandbox agy --profile work -p "Check git status"
+  agent-sandbox claude --profile personal
+  agent-sandbox codex --profile client-a
+  agent-sandbox agy --version  (runs agy directly on host)
+EOF
+}
+
+# ------------------------------------------------------------------------------
+# Agent Normalization
+# ------------------------------------------------------------------------------
+resolve_agent() {
+  local raw="$1"
+  case "$raw" in
+    antigravity|agy)
+      echo "antigravity"
+      ;;
+    claude|claude-code)
+      echo "claude"
+      ;;
+    codex)
+      echo "codex"
+      ;;
+    opencode)
+      echo "opencode"
+      ;;
+    opencode2|opencode-v2)
+      echo "opencode2"
+      ;;
+    pi)
+      echo "pi"
+      ;;
+    orca)
+      echo "orca"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Agent Binary Resolution
+# ------------------------------------------------------------------------------
+get_agent_binary() {
+  local agent="$1"
+  case "$agent" in
+    antigravity)
+      if [ -x "/opt/antigravity/bin/agy" ]; then echo "/opt/antigravity/bin/agy"
+      elif [ -x "/opt/config/bin/agy" ]; then echo "/opt/config/bin/agy"
+      elif [ -x "$HOME/.local/bin/agy" ]; then echo "$HOME/.local/bin/agy"
+      else command -v agy 2>/dev/null || command -v antigravity 2>/dev/null || true; fi
+      ;;
+    claude)
+      if [ -x "/opt/config/bin/claude" ]; then echo "/opt/config/bin/claude"
+      elif [ -x "/opt/claude/bin/claude" ]; then echo "/opt/claude/bin/claude"
+      elif [ -x "$HOME/.local/bin/claude" ]; then echo "$HOME/.local/bin/claude"
+      else command -v claude 2>/dev/null || command -v claude-code 2>/dev/null || true; fi
+      ;;
+    codex)
+      if [ -x "/opt/config/bin/codex" ]; then echo "/opt/config/bin/codex"
+      elif [ -x "/opt/codex/bin/codex" ]; then echo "/opt/codex/bin/codex"
+      elif [ -x "$HOME/.local/bin/codex" ]; then echo "$HOME/.local/bin/codex"
+      else command -v codex 2>/dev/null || true; fi
+      ;;
+    opencode)
+      if [ -x "/opt/config/bin/opencode" ]; then echo "/opt/config/bin/opencode"
+      elif [ -x "/opt/opencode/bin/opencode" ]; then echo "/opt/opencode/bin/opencode"
+      elif [ -x "$HOME/.local/bin/opencode" ]; then echo "$HOME/.local/bin/opencode"
+      else command -v opencode 2>/dev/null || true; fi
+      ;;
+    opencode2)
+      if [ -x "/opt/config/bin/opencode2" ]; then echo "/opt/config/bin/opencode2"
+      elif [ -x "/opt/opencode2/bin/opencode2" ]; then echo "/opt/opencode2/bin/opencode2"
+      elif [ -x "$HOME/.local/bin/opencode2" ]; then echo "$HOME/.local/bin/opencode2"
+      else command -v opencode2 2>/dev/null || command -v opencode-v2 2>/dev/null || true; fi
+      ;;
+    pi)
+      if [ -x "/opt/config/bin/pi" ]; then echo "/opt/config/bin/pi"
+      elif [ -x "/opt/pi/bin/pi" ]; then echo "/opt/pi/bin/pi"
+      elif [ -x "$HOME/.local/bin/pi" ]; then echo "$HOME/.local/bin/pi"
+      else command -v pi 2>/dev/null || true; fi
+      ;;
+    orca)
+      if [ -x "/opt/config/bin/orca" ]; then echo "/opt/config/bin/orca"
+      elif [ -x "/opt/orca/orca" ]; then echo "/opt/orca/orca"
+      elif [ -x "$HOME/.local/bin/orca" ]; then echo "$HOME/.local/bin/orca"
+      else command -v orca 2>/dev/null || true; fi
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# Profile Status Inspector
+# ------------------------------------------------------------------------------
+inspect_profile_status() {
+  local agent="$1"
+  local profile_dir="$2"
+
+  case "$agent" in
+    antigravity)
+      if [ -f "$profile_dir/antigravity-cli/antigravity-oauth-token" ]; then
+        echo "Authenticated"
+      elif [ -d "$profile_dir/antigravity-cli" ]; then
+        echo "Initialized"
+      else
+        echo "New"
+      fi
+      ;;
+    claude)
+      if [ -f "$profile_dir/.credentials.json" ] || [ -f "$profile_dir/.claude.json" ] || [ -f "$profile_dir/claude.json" ]; then
+        echo "Authenticated"
+      elif [ -d "$profile_dir" ] && [ "$(ls -A "$profile_dir" 2>/dev/null)" ]; then
+        echo "Initialized"
+      else
+        echo "New"
+      fi
+      ;;
+    codex)
+      if [ -f "$profile_dir/auth.json" ]; then
+        echo "Authenticated"
+      elif [ -f "$profile_dir/config.toml" ]; then
+        echo "Configured"
+      else
+        echo "New"
+      fi
+      ;;
+    opencode)
+      if [ -f "$profile_dir/config/auth.json" ] || [ -f "$profile_dir/data/opencode.db" ]; then
+        echo "Active"
+      elif [ -d "$profile_dir/config" ] || [ -d "$profile_dir/data" ]; then
+        echo "Initialized"
+      else
+        echo "New"
+      fi
+      ;;
+    opencode2)
+      if [ -f "$profile_dir/service.json" ] || [ -f "$profile_dir/cli.json" ]; then
+        echo "Active"
+      elif [ -d "$profile_dir" ] && [ "$(ls -A "$profile_dir" 2>/dev/null)" ]; then
+        echo "Initialized"
+      else
+        echo "New"
+      fi
+      ;;
+    pi)
+      if [ -f "$profile_dir/auth.json" ] || [ -f "$profile_dir/models-store.json" ]; then
+        echo "Configured"
+      elif [ -d "$profile_dir" ] && [ "$(ls -A "$profile_dir" 2>/dev/null)" ]; then
+        echo "Initialized"
+      else
+        echo "New"
+      fi
+      ;;
+    orca)
+      if [ -f "$profile_dir/home_orca/orca-runtime.json" ] || [ -f "$profile_dir/home_orca/orchestration.db" ]; then
+        echo "Active"
+      elif [ -d "$profile_dir/user_data" ] || [ -d "$profile_dir/home_orca" ]; then
+        echo "Initialized"
+      else
+        echo "New"
+      fi
+      ;;
+    *)
+      echo "Unknown"
+      ;;
+  esac
+}
+
+# ------------------------------------------------------------------------------
+# List Profiles (Table Format)
+# ------------------------------------------------------------------------------
+list_profiles() {
+  local target_agent="${1:-all}"
+  local agents_to_check=()
+
+  if [ "$target_agent" = "all" ] || [ -z "$target_agent" ]; then
+    agents_to_check=(antigravity claude codex opencode opencode2 pi orca)
+  else
+    agents_to_check=("$target_agent")
+  fi
+
+  local found_any=0
+  local rows=()
+
+  for ag in "${agents_to_check[@]}"; do
+    local base_dir="$SANDBOX_BASE/$ag"
+    # Check legacy antigravity-sandbox location if present
+    if [ "$ag" = "antigravity" ] && [ ! -d "$base_dir" ] && [ -d "/opt/config/antigravity-sandbox/accounts" ]; then
+      base_dir="/opt/config/antigravity-sandbox/accounts"
+    fi
+
+    [ -d "$base_dir" ] || continue
+
+    for p_path in "$base_dir"/*; do
+      [ -d "$p_path" ] || continue
+      local p_name
+      p_name="$(basename "$p_path")"
+      # Skip hidden or reserved items
+      [[ "$p_name" == .* ]] && continue
+
+      local p_size p_mod p_status
+      p_size="$(du -sh "$p_path" 2>/dev/null | awk '{print $1}')"
+      p_size="${p_size:-0B}"
+
+      if stat -c '%y' "$p_path" >/dev/null 2>&1; then
+        p_mod="$(stat -c '%y' "$p_path" | cut -c1-16)"
+      elif stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$p_path" >/dev/null 2>&1; then
+        p_mod="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$p_path")"
+      else
+        p_mod="N/A"
+      fi
+
+      p_status="$(inspect_profile_status "$ag" "$p_path")"
+
+      rows+=("$ag|$p_name|$p_size|$p_mod|$p_status|$p_path")
+      found_any=1
+    done
+  done
+
+  if [ "$found_any" -eq 0 ]; then
+    if [ "$target_agent" != "all" ]; then
+      echo "No profiles found for '$target_agent' under $SANDBOX_BASE/$target_agent/"
+      echo "Create one with: agent-sandbox $target_agent --profile <name>"
+    else
+      echo "No sandbox profiles found under $SANDBOX_BASE/"
+      echo "Create one with: agent-sandbox <agent> --profile <name>"
+    fi
+    return 0
+  fi
+
+  # Render ASCII Table
+  echo "+-------------+----------------------+----------+-------------------+----------------+-------------------------------------------------------------+"
+  printf "| %-11s | %-20s | %-8s | %-17s | %-14s | %-59s |\n" "Agent" "Profile" "Size" "Last Modified" "Status" "Directory"
+  echo "+-------------+----------------------+----------+-------------------+----------------+-------------------------------------------------------------+"
+  for row in "${rows[@]}"; do
+    IFS='|' read -r r_ag r_name r_size r_mod r_stat r_dir <<< "$row"
+    printf "| %-11s | %-20s | %-8s | %-17s | %-14s | %-59s |\n" "$r_ag" "$r_name" "$r_size" "$r_mod" "$r_stat" "$r_dir"
+  done
+  echo "+-------------+----------------------+----------+-------------------+----------------+-------------------------------------------------------------+"
+}
+
+# ------------------------------------------------------------------------------
+# Direct Execution (No Sandbox)
+# ------------------------------------------------------------------------------
+run_direct() {
+  local agent="$1"
+  shift
+  local bin
+  bin="$(get_agent_binary "$agent")"
+
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    echo "[agent-sandbox] ERROR: Cannot locate binary for '$agent'" >&2
+    exit 1
+  fi
+
+  case "$agent" in
+    claude)
+      [ -d "/opt/claude" ] && export NPM_CONFIG_PREFIX="/opt/claude"
+      ;;
+    opencode2)
+      [ -d "/opt/config/opencode2" ] && export OPENCODE_CONFIG_DIR="${OPENCODE2_CONFIG_DIR:-/opt/config/opencode2}"
+      ;;
+  esac
+
+  exec "$bin" "$@"
+}
+
+# ------------------------------------------------------------------------------
+# Sandboxed Execution (Bubblewrap)
+# ------------------------------------------------------------------------------
+run_sandbox() {
+  local agent="$1"
+  local profile="$2"
+  shift 2
+  local forward_args=("$@")
+
+  if ! command -v bwrap >/dev/null 2>&1; then
+    echo "[agent-sandbox] ERROR: 'bwrap' (bubblewrap) is not installed." >&2
+    echo "[agent-sandbox] Install via your package manager:" >&2
+    echo "  Debian/Ubuntu: sudo apt install bubblewrap" >&2
+    echo "  Fedora:        sudo dnf install bubblewrap" >&2
+    echo "  Arch Linux:    sudo pacman -S bubblewrap" >&2
+    echo "  Alpine:        sudo apk add bubblewrap" >&2
+    exit 1
+  fi
+
+  local real_bin
+  real_bin="$(get_agent_binary "$agent")"
+  if [ -z "$real_bin" ] || [ ! -x "$real_bin" ]; then
+    echo "[agent-sandbox] ERROR: Cannot locate binary for '$agent'" >&2
+    exit 1
+  fi
+
+  # Determine profile directory
+  local profile_dir
+  if [[ "$profile" = /* ]]; then
+    profile_dir="$profile"
+  else
+    profile_dir="$SANDBOX_BASE/$agent/$profile"
+  fi
+
+  mkdir -p "$profile_dir"
+
+  # Declare mount pairs: host_source -> in_sandbox_target
+  local mount_pairs=()
+  local env_vars=()
+
+  case "$agent" in
+    antigravity)
+      mkdir -p "$profile_dir/antigravity-cli" "$profile_dir/config"
+      # If current directory is within antigravity config tree, ensure relative subpath exists in profile
+      case "$PWD" in
+        /opt/config/antigravity/*) mkdir -p "$profile_dir/${PWD#/opt/config/antigravity/}" ;;
+        "$HOME"/.gemini/*)         mkdir -p "$profile_dir/${PWD#$HOME/.gemini/}" ;;
+        "$HOME"/.antigravity/*)    mkdir -p "$profile_dir/${PWD#$HOME/.antigravity/}" ;;
+      esac
+      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+      if [ ! -f "$profile_dir/config/mcp_config.json" ] && [ -f "/opt/config/antigravity/config/mcp_config.json" ]; then
+        cp -p "/opt/config/antigravity/config/mcp_config.json" "$profile_dir/config/mcp_config.json"
+      fi
+
+      [ -d "/opt/config/antigravity" ] && mount_pairs+=("$profile_dir|/opt/config/antigravity")
+      if [ ! -L "$HOME/.gemini" ]; then
+        mkdir -p "$HOME/.gemini"
+        mount_pairs+=("$profile_dir|$HOME/.gemini")
+      fi
+      if [ ! -L "$HOME/.antigravity" ]; then
+        mkdir -p "$HOME/.antigravity"
+        mount_pairs+=("$profile_dir|$HOME/.antigravity")
+      fi
+
+      env_vars+=(
+        "ANTIGRAVITY_APP_DATA_DIR=/opt/config/antigravity"
+        "ANTIGRAVITY_GEMINI_DIR=/opt/config/antigravity"
+        "AGY_PROFILE=$profile_dir"
+      )
+      ;;
+
+    claude)
+      mkdir -p "$profile_dir"
+      case "$PWD" in
+        /opt/config/claude/*) mkdir -p "$profile_dir/${PWD#/opt/config/claude/}" ;;
+        "$HOME"/.claude/*)    mkdir -p "$profile_dir/${PWD#$HOME/.claude/}" ;;
+      esac
+      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+      [ ! -e "$profile_dir/rules" ] && [ -d "$HOME/.agents/rules" ] && ln -sfn "$HOME/.agents/rules" "$profile_dir/rules"
+
+      [ -d "/opt/config/claude" ] && mount_pairs+=("$profile_dir|/opt/config/claude")
+      if [ ! -L "$HOME/.claude" ]; then
+        mkdir -p "$HOME/.claude"
+        mount_pairs+=("$profile_dir|$HOME/.claude")
+      fi
+
+      env_vars+=(
+        "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-/opt/config/claude}"
+        "CLAUDE_PROFILE=$profile_dir"
+      )
+      [ -d "/opt/claude" ] && env_vars+=("NPM_CONFIG_PREFIX=/opt/claude")
+      ;;
+
+    codex)
+      mkdir -p "$profile_dir"
+      case "$PWD" in
+        /opt/config/codex/*) mkdir -p "$profile_dir/${PWD#/opt/config/codex/}" ;;
+        "$HOME"/.codex/*)    mkdir -p "$profile_dir/${PWD#$HOME/.codex/}" ;;
+      esac
+      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+
+      [ -d "/opt/config/codex" ] && mount_pairs+=("$profile_dir|/opt/config/codex")
+      if [ ! -L "$HOME/.codex" ]; then
+        mkdir -p "$HOME/.codex"
+        mount_pairs+=("$profile_dir|$HOME/.codex")
+      fi
+
+      env_vars+=(
+        "CODEX_HOME=${CODEX_HOME:-/opt/config/codex}"
+        "CODEX_PROFILE=$profile_dir"
+      )
+      ;;
+
+    opencode)
+      # Multi-folder agent: config and data subdirectories
+      mkdir -p "$profile_dir/config" "$profile_dir/data"
+      case "$PWD" in
+        /opt/config/opencode/*)              mkdir -p "$profile_dir/config/${PWD#/opt/config/opencode/}" ;;
+        "$HOME"/.config/opencode/*)          mkdir -p "$profile_dir/config/${PWD#$HOME/.config/opencode/}" ;;
+        "$HOME"/.local/share/opencode/*)     mkdir -p "$profile_dir/data/${PWD#$HOME/.local/share/opencode/}" ;;
+      esac
+      [ ! -e "$profile_dir/config/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/config/skills"
+
+      [ -d "/opt/config/opencode" ] && mount_pairs+=("$profile_dir/config|/opt/config/opencode")
+      if [ ! -L "$HOME/.config/opencode" ]; then
+        mkdir -p "$HOME/.config/opencode"
+        mount_pairs+=("$profile_dir/config|$HOME/.config/opencode")
+      fi
+      mkdir -p "$HOME/.local/share/opencode"
+      mount_pairs+=("$profile_dir/data|$HOME/.local/share/opencode")
+
+      env_vars+=(
+        "OPENCODE_PROFILE=$profile_dir"
+      )
+      ;;
+
+    opencode2)
+      mkdir -p "$profile_dir"
+      case "$PWD" in
+        /opt/config/opencode2/*)           mkdir -p "$profile_dir/${PWD#/opt/config/opencode2/}" ;;
+        "$HOME"/.config/opencode2/*)       mkdir -p "$profile_dir/${PWD#$HOME/.config/opencode2/}" ;;
+        "$HOME"/.config/opencode-v2/*)     mkdir -p "$profile_dir/${PWD#$HOME/.config/opencode-v2/}" ;;
+      esac
+      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+
+      [ -d "/opt/config/opencode2" ] && mount_pairs+=("$profile_dir|/opt/config/opencode2")
+      if [ ! -L "$HOME/.config/opencode2" ]; then
+        mkdir -p "$HOME/.config/opencode2"
+        mount_pairs+=("$profile_dir|$HOME/.config/opencode2")
+      fi
+      if [ ! -L "$HOME/.config/opencode-v2" ]; then
+        mkdir -p "$HOME/.config/opencode-v2"
+        mount_pairs+=("$profile_dir|$HOME/.config/opencode-v2")
+      fi
+
+      env_vars+=(
+        "OPENCODE_CONFIG_DIR=${OPENCODE2_CONFIG_DIR:-/opt/config/opencode2}"
+        "OPENCODE2_CONFIG_DIR=${OPENCODE2_CONFIG_DIR:-/opt/config/opencode2}"
+        "OPENCODE2_PROFILE=$profile_dir"
+      )
+      ;;
+
+    pi)
+      mkdir -p "$profile_dir"
+      case "$PWD" in
+        /opt/config/pi/*)       mkdir -p "$profile_dir/${PWD#/opt/config/pi/}" ;;
+        "$HOME"/.pi/agent/*)    mkdir -p "$profile_dir/${PWD#$HOME/.pi/agent/}" ;;
+      esac
+      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+
+      [ -d "/opt/config/pi" ] && mount_pairs+=("$profile_dir|/opt/config/pi")
+      if [ ! -L "$HOME/.pi/agent" ]; then
+        mkdir -p "$HOME/.pi/agent"
+        mount_pairs+=("$profile_dir|$HOME/.pi/agent")
+      fi
+
+      env_vars+=(
+        "PI_CODING_AGENT_DIR=${PI_CODING_AGENT_DIR:-/opt/config/pi}"
+        "PI_PROFILE=$profile_dir"
+      )
+      ;;
+
+    orca)
+      # Multi-folder agent: user_data and home_orca subdirectories
+      mkdir -p "$profile_dir/user_data" "$profile_dir/home_orca"
+      case "$PWD" in
+        /opt/config/orca/*)  mkdir -p "$profile_dir/user_data/${PWD#/opt/config/orca/}" ;;
+        "$HOME"/.orca/*)     mkdir -p "$profile_dir/home_orca/${PWD#$HOME/.orca/}" ;;
+      esac
+
+      [ -d "/opt/config/orca" ] && mount_pairs+=("$profile_dir/user_data|/opt/config/orca")
+      if [ ! -L "$HOME/orca_auto/config" ] && [ -d "$HOME/orca_auto" ]; then
+        mkdir -p "$HOME/orca_auto/config"
+        mount_pairs+=("$profile_dir/user_data|$HOME/orca_auto/config")
+      fi
+      mkdir -p "$HOME/.orca"
+      mount_pairs+=("$profile_dir/home_orca|$HOME/.orca")
+
+      env_vars+=(
+        "ORCA_USER_DATA=/opt/config/orca"
+        "ORCA_PROFILE=$profile_dir"
+      )
+      ;;
+  esac
+
+  # Build Bubblewrap Arguments
+  local bwrap_args=(
+    # System roots (read-only)
+    --ro-bind /usr /usr
+    --ro-bind-try /lib /lib
+    --ro-bind-try /lib64 /lib64
+    --ro-bind-try /bin /bin
+    --ro-bind-try /sbin /sbin
+    --ro-bind /etc /etc
+
+    # Virtual filesystems
+    --dev /dev
+    --proc /proc
+    --bind /tmp /tmp
+
+    # Workspace (read-write per requirements)
+    --bind-try /workspace /workspace
+
+    # Caches & shared storage
+    --bind-try /mnt/cache /mnt/cache
+    --ro-bind-try /mnt/sharedCache /mnt/sharedCache
+
+    # Tools tree (read-only)
+    --ro-bind-try /opt /opt
+
+    # Worktrunk state & approvals (read-write for lock files and approvals)
+    --bind-try /opt/config/worktrunk /opt/config/worktrunk
+    --bind-try "$HOME/.config/worktrunk" "$HOME/.config/worktrunk"
+
+    # User Home
+    --bind "$HOME" "$HOME"
+  )
+
+  # Apply agent-specific profile mounts
+  for pair in "${mount_pairs[@]}"; do
+    IFS='|' read -r src dst <<< "$pair"
+    bwrap_args+=(--bind "$src" "$dst")
+  done
+
+  # Also expose the profile directory at its absolute path
+  bwrap_args+=(--bind "$profile_dir" "$profile_dir")
+
+  # Set base environment
+  bwrap_args+=(
+    --setenv HOME "$HOME"
+    --setenv PATH "$PATH"
+    --setenv USER "${USER:-$OWNER}"
+    --setenv AGENT_SANDBOX_ACTIVE "1"
+    --setenv AGENT_SANDBOX_AGENT "$agent"
+    --setenv AGENT_SANDBOX_PROFILE "$profile"
+    --setenv AGENT_SANDBOX_DIR "$profile_dir"
+  )
+
+  # Set agent-specific environment variables
+  for ev in "${env_vars[@]}"; do
+    local k="${ev%%=*}"
+    local v="${ev#*=}"
+    bwrap_args+=(--setenv "$k" "$v")
+  done
+
+  # Working directory
+  bwrap_args+=(--chdir "$PWD")
+
+  # Execute agent binary inside Bubblewrap sandbox
+  exec bwrap "${bwrap_args[@]}" "$real_bin" "${forward_args[@]}"
+}
+
+# ------------------------------------------------------------------------------
+# Main Dispatcher
+# ------------------------------------------------------------------------------
+main() {
+  if [ $# -eq 0 ]; then
+    usage
+    exit 0
+  fi
+
+  # Top-level global flags
+  case "$1" in
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    --list-profile|--list-profiles|--list)
+      list_profiles "all"
+      exit 0
+      ;;
+  esac
+
+  local raw_agent="$1"
+  shift
+
+  local canonical_agent
+  canonical_agent="$(resolve_agent "$raw_agent")"
+
+  if [ -z "$canonical_agent" ]; then
+    echo "[agent-sandbox] ERROR: Unknown agent '$raw_agent'" >&2
+    echo "Supported agents: antigravity (agy), claude, codex, opencode, opencode2, pi, orca" >&2
+    exit 1
+  fi
+
+  local is_list_profile=0
+  local profile_arg=""
+  local forward_args=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --list-profile|--list-profiles|--list)
+        is_list_profile=1
+        shift 1
+        ;;
+      --profile)
+        if [ $# -lt 2 ]; then
+          echo "[agent-sandbox] ERROR: --profile requires a profile name or directory path" >&2
+          exit 1
+        fi
+        profile_arg="$2"
+        shift 2
+        ;;
+      --profile=*)
+        profile_arg="${1#--profile=}"
+        shift 1
+        ;;
+      *)
+        forward_args+=("$1")
+        shift 1
+        ;;
+    esac
+  done
+
+  # 1. Action: List profiles for this agent
+  if [ "$is_list_profile" -eq 1 ]; then
+    list_profiles "$canonical_agent"
+    exit 0
+  fi
+
+  # 2. Action: Run with isolated profile
+  if [ -n "$profile_arg" ]; then
+    run_sandbox "$canonical_agent" "$profile_arg" "${forward_args[@]}"
+  fi
+
+  # 3. Action: Default — run agent command directly on host with arguments
+  run_direct "$canonical_agent" "${forward_args[@]}"
+}
+
+main "$@"
