@@ -14,8 +14,11 @@
 #   agent-sandbox <agent> --profile <profile_name> [agent args...]
 #   agent-sandbox <agent> [agent args...]  (runs agent directly on host)
 #   agent-sandbox --list-profile           (lists profiles across all agents)
+#   agent-sandbox --version
 #
 set -euo pipefail
+
+AGENT_SANDBOX_VERSION="0.0.1"
 
 # Determine base directory for storing agent profiles
 if [ -n "${AGENT_SANDBOX_BASE:-}" ]; then
@@ -31,6 +34,15 @@ else
 fi
 
 OWNER="${AGENT_SANDBOX_OWNER:-${USER:-$(id -un 2>/dev/null || echo "user")}}"
+
+# Global skills directory that is linked into newly created profiles
+if [ -n "${AGENT_SANDBOX_SKILLS:-}" ]; then
+  SANDBOX_SKILLS="$AGENT_SANDBOX_SKILLS"
+elif [ -d "/opt/config/.agents/skills" ]; then
+  SANDBOX_SKILLS="/opt/config/.agents/skills"
+else
+  SANDBOX_SKILLS="${HOME}/.agents/skills"
+fi
 
 # ------------------------------------------------------------------------------
 # Usage & Help
@@ -65,6 +77,8 @@ SUPPORTED AGENTS & ALIASES:
 ENVIRONMENT VARIABLES:
   AGENT_SANDBOX_BASE    Base directory for profiles (default: /opt/config/agent-sandbox or ~/.local/share/agent-sandbox)
   AGENT_SANDBOX_OWNER   Primary user name (default: current user)
+  AGENT_SANDBOX_SKILLS  Skills directory linked into new profiles (default: /opt/config/.agents/skills or ~/.agents/skills)
+  AGENT_SANDBOX_NET_ENV File that may set SANDBOX_IPV6 (default: <sandbox_base>/net.env)
 
 EXAMPLES:
   agent-sandbox claude --list-profile
@@ -387,7 +401,7 @@ run_sandbox() {
         "$HOME"/.gemini/*)         mkdir -p "$profile_dir/${PWD#$HOME/.gemini/}" ;;
         "$HOME"/.antigravity/*)    mkdir -p "$profile_dir/${PWD#$HOME/.antigravity/}" ;;
       esac
-      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+      [ ! -e "$profile_dir/skills" ] && [ -d "$SANDBOX_SKILLS" ] && ln -sfn "$SANDBOX_SKILLS" "$profile_dir/skills"
       if [ ! -f "$profile_dir/config/mcp_config.json" ] && [ -f "/opt/config/antigravity/config/mcp_config.json" ]; then
         cp -p "/opt/config/antigravity/config/mcp_config.json" "$profile_dir/config/mcp_config.json"
       fi
@@ -415,7 +429,7 @@ run_sandbox() {
         /opt/config/claude/*) mkdir -p "$profile_dir/${PWD#/opt/config/claude/}" ;;
         "$HOME"/.claude/*)    mkdir -p "$profile_dir/${PWD#$HOME/.claude/}" ;;
       esac
-      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+      [ ! -e "$profile_dir/skills" ] && [ -d "$SANDBOX_SKILLS" ] && ln -sfn "$SANDBOX_SKILLS" "$profile_dir/skills"
       [ ! -e "$profile_dir/rules" ] && [ -d "$HOME/.agents/rules" ] && ln -sfn "$HOME/.agents/rules" "$profile_dir/rules"
 
       [ -d "/opt/config/claude" ] && mount_pairs+=("$profile_dir|/opt/config/claude")
@@ -437,7 +451,7 @@ run_sandbox() {
         /opt/config/codex/*) mkdir -p "$profile_dir/${PWD#/opt/config/codex/}" ;;
         "$HOME"/.codex/*)    mkdir -p "$profile_dir/${PWD#$HOME/.codex/}" ;;
       esac
-      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+      [ ! -e "$profile_dir/skills" ] && [ -d "$SANDBOX_SKILLS" ] && ln -sfn "$SANDBOX_SKILLS" "$profile_dir/skills"
 
       [ -d "/opt/config/codex" ] && mount_pairs+=("$profile_dir|/opt/config/codex")
       if [ ! -L "$HOME/.codex" ]; then
@@ -459,7 +473,7 @@ run_sandbox() {
         "$HOME"/.config/opencode/*)          mkdir -p "$profile_dir/config/${PWD#$HOME/.config/opencode/}" ;;
         "$HOME"/.local/share/opencode/*)     mkdir -p "$profile_dir/data/${PWD#$HOME/.local/share/opencode/}" ;;
       esac
-      [ ! -e "$profile_dir/config/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/config/skills"
+      [ ! -e "$profile_dir/config/skills" ] && [ -d "$SANDBOX_SKILLS" ] && ln -sfn "$SANDBOX_SKILLS" "$profile_dir/config/skills"
 
       [ -d "/opt/config/opencode" ] && mount_pairs+=("$profile_dir/config|/opt/config/opencode")
       if [ ! -L "$HOME/.config/opencode" ]; then
@@ -481,7 +495,7 @@ run_sandbox() {
         "$HOME"/.config/opencode2/*)       mkdir -p "$profile_dir/${PWD#$HOME/.config/opencode2/}" ;;
         "$HOME"/.config/opencode-v2/*)     mkdir -p "$profile_dir/${PWD#$HOME/.config/opencode-v2/}" ;;
       esac
-      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+      [ ! -e "$profile_dir/skills" ] && [ -d "$SANDBOX_SKILLS" ] && ln -sfn "$SANDBOX_SKILLS" "$profile_dir/skills"
 
       [ -d "/opt/config/opencode2" ] && mount_pairs+=("$profile_dir|/opt/config/opencode2")
       if [ ! -L "$HOME/.config/opencode2" ]; then
@@ -506,7 +520,7 @@ run_sandbox() {
         /opt/config/pi/*)       mkdir -p "$profile_dir/${PWD#/opt/config/pi/}" ;;
         "$HOME"/.pi/agent/*)    mkdir -p "$profile_dir/${PWD#$HOME/.pi/agent/}" ;;
       esac
-      [ ! -e "$profile_dir/skills" ] && [ -d "/opt/config/.agents/skills" ] && ln -sfn "/opt/config/.agents/skills" "$profile_dir/skills"
+      [ ! -e "$profile_dir/skills" ] && [ -d "$SANDBOX_SKILLS" ] && ln -sfn "$SANDBOX_SKILLS" "$profile_dir/skills"
 
       [ -d "/opt/config/pi" ] && mount_pairs+=("$profile_dir|/opt/config/pi")
       if [ ! -L "$HOME/.pi/agent" ]; then
@@ -606,6 +620,20 @@ run_sandbox() {
   # Working directory
   bwrap_args+=(--chdir "$PWD")
 
+  # Optional dedicated IPv6: if SANDBOX_IPV6 is set (in $SANDBOX_BASE/net.env or AGENT_SANDBOX_NET_ENV), run inside a
+  # pasta-managed network namespace whose outbound sockets bind to that address. Side effect: the sandbox does not
+  # share the host's localhost. Without it nothing changes.
+  local net_env="${AGENT_SANDBOX_NET_ENV:-$SANDBOX_BASE/net.env}"
+  [ -r "$net_env" ] && . "$net_env"
+  if [ -n "${SANDBOX_IPV6:-}" ]; then
+    if ! command -v pasta >/dev/null 2>&1; then
+      echo "[agent-sandbox] ERROR: SANDBOX_IPV6 is set but 'pasta' (passt) is not installed." >&2
+      return 1
+    fi
+    exec pasta --config-net -t none -u none -T none -U none -o "$SANDBOX_IPV6" -- \
+      bwrap "${bwrap_args[@]}" "$real_bin" "${forward_args[@]}"
+  fi
+
   # Execute agent binary inside Bubblewrap sandbox
   exec bwrap "${bwrap_args[@]}" "$real_bin" "${forward_args[@]}"
 }
@@ -623,6 +651,10 @@ main() {
   case "$1" in
     -h|--help|help)
       usage
+      exit 0
+      ;;
+    -V|--version|version)
+      echo "agent-sandbox $AGENT_SANDBOX_VERSION"
       exit 0
       ;;
     --list-profile|--list-profiles|--list)

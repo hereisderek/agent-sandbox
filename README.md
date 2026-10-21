@@ -156,6 +156,32 @@ Customize behavior using environment variables:
 | :--- | :--- | :--- |
 | `AGENT_SANDBOX_BASE` | Directory where profile data is stored | `/opt/config/agent-sandbox` or `~/.local/share/agent-sandbox` |
 | `AGENT_SANDBOX_OWNER` | User identity for file permissions | Current user (`$USER`) |
+| `AGENT_SANDBOX_SKILLS` | Skills directory linked into new profiles | `/opt/config/.agents/skills`, else `~/.agents/skills` |
+| `AGENT_SANDBOX_NET_ENV` | File that may set `SANDBOX_IPV6` (see below) | `<base>/net.env` |
+
+A multi-user host sets the base and skills per user, for example in `/etc/profile.d/agent-sandbox.sh`:
+
+```bash
+export AGENT_SANDBOX_BASE="$HOME/.local/share/agent-sandbox" AGENT_SANDBOX_SKILLS="$HOME/.agents/skills"
+```
+
+### Dedicated IPv6 (optional)
+
+If `net.env` (in the base directory, or the file named by `AGENT_SANDBOX_NET_ENV`) sets `SANDBOX_IPV6=<address>`, `agent-sandbox` runs `bwrap` under `pasta` (package `passt`) so outbound sockets bind to that address and only the sandbox uses it. The sandbox then no longer shares the host's `localhost`. It fails with a clear error if `pasta` is missing. Without `net.env` nothing changes.
+
+---
+
+## Versions and updating
+
+`agent-sandbox --version` prints the version. Releases are tagged without a `v` (for example `0.0.1`) and carry the single file `agent-sandbox` as an asset. `update.sh` installs the latest release only when it is newer than the installed one:
+
+```bash
+./update.sh --check            # exit 0 up to date, 10 newer release exists
+./update.sh                    # install it over the agent-sandbox on PATH
+./update.sh /opt/tools/agent-sandbox/agent-sandbox
+```
+
+A copy that is a symlink into a git clone is updated with `git pull` instead.
 
 ---
 
