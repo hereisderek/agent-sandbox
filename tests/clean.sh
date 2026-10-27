@@ -61,8 +61,8 @@ check "bad --days rejected"                    bash -c "! '$SB' --auto-clean --d
 check "unknown agent rejected"                 bash -c "! '$SB' --auto-clean nosuch >/dev/null 2>&1"
 check "nothing left to clean is not an error"  bash -c "$SB --auto-clean --yes >/dev/null"
 
-# --- interactive mode: answers come from stdin. Listing order (agent, then name):
-#     1 claude/auth  2 claude/fresh  3 claude/stale (*)  4 codex/authed  5 codex/old (*)
+# --- interactive mode: keys come from stdin (one char at a time; a newline is Enter, \033[B is Down).
+#     Row order (agent, then name): 1 claude/auth  2 claude/fresh  3 claude/stale (*)  4 codex/authed  5 codex/old (*)
 rm -rf "$B"; mkdir -p "$B/.net/claude"
 mk claude auth  "$B/claude/auth/.claude.json"; age "$B/claude/auth"
 mk claude fresh "$B/claude/fresh/skills/x"
@@ -70,36 +70,45 @@ mk claude stale "$B/claude/stale/skills/x";    age "$B/claude/stale"
 mk codex  authed "$B/codex/authed/auth.json";  age "$B/codex/authed"
 mk codex  old    "$B/codex/old/tmp/x";         age "$B/codex/old"
 echo ipv6=host > "$B/.net/claude/stale.conf"; : > "$T/hook.log"
-ia() { printf '%s\n' "$@" | "$SB" --auto-clean -i 2>&1; }
+keys() { printf "$1" | "$SB" --auto-clean -i "${@:2}" 2>&1; }
 
-out="$(ia q)"
-check "interactive lists all profiles"          bash -c "[ \$(grep -cE '^ *[0-9]+\)' <<< '$out') -eq 5 ]"
-check "flagged ones carry a *"                  grep -qE '[0-9]\) \* claude +stale' <<< "$out"
-check "authenticated ones are not flagged"      bash -c "! grep -qE '[0-9]\) \* +(claude +auth|codex +authed)' <<< '$out'"
+out="$(keys q)"
+check "lists all five profiles, none selected"  bash -c "[ \$(grep -c '○' <<< '$out') -eq 5 ]"
+check "the cursor starts on the first row"      grep -qE '^> ○   claude +auth' <<< "$out"
+check "flagged rows carry a *"                  grep -qE '○ \* claude +stale' <<< "$out"
+check "authenticated rows are not flagged"      bash -c "! grep -qE '○ \* +(claude +auth|codex +authed)' <<< '$out'"
 check "q removes nothing"                       test -d "$B/claude/stale"
 
-ia 2 n >/dev/null
-check "answering n removes nothing"             test -d "$B/claude/fresh"
-check "out-of-range returns failure"            bash -c "! printf '99\n' | '$SB' --auto-clean -i >/dev/null 2>&1"
-check "bad token returns failure"               bash -c "! printf 'x1\n' | '$SB' --auto-clean -i >/dev/null 2>&1"
-check "trailing hyphen returns failure"         bash -c "! printf '3-\n' | '$SB' --auto-clean -i >/dev/null 2>&1"
+keys ' ' >/dev/null
+check "end of input without Enter removes nothing" test -d "$B/claude/stale" -a -d "$B/claude/auth"
+keys '\033' >/dev/null
+check "a lone Esc quits"                        test -d "$B/claude/auth"
+keys 'j \nn\n' >/dev/null
+check "toggle, Enter, answer n: nothing removed" test -d "$B/claude/fresh"
+out="$(keys '\n')";   check "Enter with nothing selected says so"  grep -q 'Nothing selected' <<< "$out"
+out="$(keys 'an\n')"; check "n clears the selection"                grep -q 'Nothing selected' <<< "$out"
+check "and nothing was removed"                 test -d "$B/claude/stale"
 
-ia 2 y >/dev/null
-check "picking an unflagged unauthenticated profile removes it (fresh)" test ! -e "$B/claude/fresh"
+keys 'j \ny\n' >/dev/null
+check "j then space then Enter then y removes row 2 (fresh)" test ! -e "$B/claude/fresh"
+mk claude fresh "$B/claude/fresh/skills/x"
+keys '\033[B\033[B\033[A \ny\n' >/dev/null
+check "arrow keys move: Down Down Up lands on row 2" test ! -e "$B/claude/fresh"
 
-printf 'a\ny\n' | "$SB" --auto-clean -i >/dev/null 2>&1
-check "a removes every * profile"               test ! -e "$B/claude/stale" -a ! -e "$B/codex/old"
+keys 'a\ny\n' >/dev/null
+check "a selects every * row and they are removed" test ! -e "$B/claude/stale" -a ! -e "$B/codex/old"
 check "its saved network choice is removed"     test ! -e "$B/.net/claude/stale.conf"
 check "the hook was told to release it"         grep -qx 'release claude stale' "$T/hook.log"
 check "authenticated profiles survive a"        test -d "$B/claude/auth" -a -d "$B/codex/authed"
 
-printf '1\ny\n' | "$SB" --auto-clean -i >/dev/null 2>&1
+keys ' \ny\n' >/dev/null
 check "authenticated pick: y is not enough"     test -d "$B/claude/auth"
-printf '1\ndelete\n' | "$SB" --auto-clean -i >/dev/null 2>&1
+keys ' \ndelete\n' >/dev/null
 check "authenticated pick: typing delete removes it" test ! -e "$B/claude/auth"
-printf '1-2\n' | "$SB" --auto-clean -i --dry-run >/dev/null 2>&1
+keys ' j \n' --dry-run >/dev/null
 check "--dry-run with -i removes nothing"       test -d "$B/codex/authed"
-printf 'q\n' | "$SB" --auto-clean codex --interactive >/dev/null 2>&1
-check "--interactive and an agent filter work"  test -d "$B/codex/authed"
+keys 'q' codex >/dev/null
+check "an agent filter works"                   test -d "$B/codex/authed"
+check "--interactive is an alias"               bash -c "printf q | '$SB' --auto-clean --interactive >/dev/null"
 
 exit $fail

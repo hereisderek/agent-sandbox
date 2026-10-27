@@ -80,9 +80,9 @@ USAGE:
       unchanged for N days (default 7; 0 = any age), with their saved network
       choice and reserved address. Lists them and asks first; --dry-run only
       lists, --yes skips the question. Authenticated profiles are never touched.
-      -i/--interactive instead shows a numbered list of ALL profiles (* marks what
-      would be auto-cleaned), lets you pick which to remove (1,3-5 or a), and asks to
-      confirm; picking a profile with credentials needs the word 'delete'.
+      -i/--interactive instead shows a checkbox list of ALL profiles (* marks what
+      would be auto-cleaned): arrows move, space toggles, a selects every *, enter
+      removes, q quits. Picking a profile with credentials needs the word 'delete'.
 
 SUPPORTED AGENTS & ALIASES:
   antigravity, agy    -> Google Antigravity CLI
@@ -412,12 +412,14 @@ remove_profile() {
   echo "removed $1/$2"
 }
 
-# clean_interactive <agent|all> <days> <dry_run>: pick profiles to remove from a numbered list.
-# Reads from stdin (not required to be a terminal). Any profile can be picked; authenticated
-# ones need the word "delete" typed. * marks what plain --auto-clean would remove.
+# clean_interactive <agent|all> <days> <dry_run>: checkbox list of profiles to remove.
+#   up/down or k/j move   space toggles   a selects every * row   n clears   enter runs   q or Esc quits
+# Keys are read from stdin one at a time (a terminal is not required). Any profile can be
+# picked; ones with credentials need the word "delete" typed. * marks what --auto-clean removes.
 clean_interactive() {
   local target="$1" days="$2" dry="$3"
-  local agents=() rows=() ag p_path st mark n i row chosen=" " sel tok a b answer need_word=0
+  local agents=() rows=() ag p_name p_path st mark n=0 i row pos=1 chosen=" " key k2 answer need_word=0 tty=0 dot cur
+  [ -t 1 ] && tty=1
   if [ "$target" = all ]; then agents=(antigravity claude codex opencode opencode2 pi orca); else agents=("$target"); fi
 
   for ag in "${agents[@]}"; do
@@ -431,26 +433,36 @@ clean_interactive() {
   n=${#rows[@]}
   if [ "$n" -eq 0 ]; then echo "No profiles found under $SANDBOX_BASE/."; return 0; fi
 
-  i=0
-  for row in "${rows[@]}"; do
-    i=$((i + 1)); IFS='|' read -r ag p_name st mark p_path <<< "$row"
-    printf '%3d) %s %-12s %-20s %-14s %s\n' "$i" "$mark" "$ag" "$p_name" "$st" "$p_path"
-  done
-  echo "* = not authenticated and unused for $days+ days (what --auto-clean removes)"
-  read -r -p "Remove which? numbers or ranges (1,3-5), a = all *, q = quit: " sel || return 0
-
-  for tok in ${sel//,/ }; do
-    case "$tok" in
+  draw() {
+    i=0
+    for row in "${rows[@]}"; do
+      i=$((i + 1)); IFS='|' read -r ag p_name st mark p_path <<< "$row"
+      cur=" "; [ "$i" -eq "$pos" ] && cur=">"
+      dot="○"; case "$chosen" in *" $i "*) dot="●" ;; esac
+      printf '%s %s %s %-12s %-20s %-14s %s\n' "$cur" "$dot" "$mark" "$ag" "$p_name" "$st" "$p_path"
+    done
+    echo "↑/↓ move  space select  a all *  n none  enter remove  q quit"
+  }
+  echo "* = not authenticated and unused $days+ days (what --auto-clean removes)"
+  # the cursor is hidden while picking and restored on any exit; redraw in place only on a terminal
+  if [ "$tty" = 1 ]; then printf '\033[?25l'; trap 'printf "\033[?25h"' EXIT; trap 'exit 130' INT TERM; fi
+  draw
+  while true; do
+    IFS= read -rsn1 key || return 0                       # end of input = quit
+    case "$key" in
+      $'\033') read -rsn2 -t 1 k2 || return 0             # a lone Esc (nothing follows) quits
+               case "$k2" in '[A') [ "$pos" -gt 1 ] && pos=$((pos - 1)) ;; '[B') [ "$pos" -lt "$n" ] && pos=$((pos + 1)) ;; esac ;;
+      k) [ "$pos" -gt 1 ] && pos=$((pos - 1)) ;;
+      j) [ "$pos" -lt "$n" ] && pos=$((pos + 1)) ;;
+      " ") case "$chosen" in *" $pos "*) chosen="${chosen/ $pos / }" ;; *) chosen+="$pos " ;; esac ;;
+      a) i=0; for row in "${rows[@]}"; do i=$((i + 1)); case "$row" in *"|*|"*) case "$chosen" in *" $i "*) ;; *) chosen+="$i " ;; esac ;; esac; done ;;
+      n) chosen=" " ;;
       q|Q) return 0 ;;
-      a|A) i=0; for row in "${rows[@]}"; do i=$((i + 1)); case "$row" in *"|*|"*) chosen+="$i " ;; esac; done ;;
-      *[!0-9-]*|""|-*|*-|*-*-*) echo "[agent-sandbox] ERROR: can't read '$tok'" >&2; return 1 ;;
-      *-*) a="${tok%-*}"; b="${tok#*-}"
-           { [ "$a" -ge 1 ] && [ "$b" -le "$n" ] && [ "$a" -le "$b" ]; } || { echo "[agent-sandbox] ERROR: bad range '$tok' (1-$n)" >&2; return 1; }
-           for ((i = a; i <= b; i++)); do chosen+="$i "; done ;;
-      *)   { [ "$tok" -ge 1 ] && [ "$tok" -le "$n" ]; } || { echo "[agent-sandbox] ERROR: no number $tok (1-$n)" >&2; return 1; }
-           chosen+="$tok " ;;
+      "") break ;;
     esac
+    [ "$tty" = 1 ] && printf '\033[%dA\033[J' $((n + 1)) && draw
   done
+  if [ "$tty" = 1 ]; then printf '\033[?25h'; fi
   if [ "$chosen" = " " ]; then echo "Nothing selected."; return 0; fi
 
   echo "Selected:"

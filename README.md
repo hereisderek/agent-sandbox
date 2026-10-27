@@ -251,7 +251,15 @@ agent-sandbox --auto-clean -i                 # pick profiles by number (also --
 - **Not authenticated.** Its status in `--list-profile` is `New` or `Initialized` (no credentials). `Authenticated`, `Active` and `Configured` profiles are never touched.
 - **Unused.** Nothing in it changed in the last `--days` days (default 7; `0` means any age).
 
-**Interactive mode** (`-i`) shows every profile, authenticated or not, in a numbered list. `*` marks what plain `--auto-clean` would remove. Answer with numbers or ranges (`1,3-5`), `a` for all `*` rows, or `q` to quit, then confirm. Picking a profile that has credentials needs the word `delete` typed. `--dry-run` shows the selection without removing anything; `<agent>` limits the list. Input is read from stdin.
+**Interactive mode** (`-i`) shows every profile, authenticated or not, as a checkbox list:
+
+```text
+  ○   claude  auth    Authenticated  /opt/config/agent-sandbox/claude/auth
+  ● * claude  stale   Initialized    /opt/config/agent-sandbox/claude/stale
+> ● * codex   old     New            /opt/config/agent-sandbox/codex/old
+```
+
+`●` is selected, `○` is not, `>` is the cursor, and `*` marks what plain `--auto-clean` would remove. Keys: `↑`/`↓` (or `k`/`j`) move, `space` toggles, `a` selects every `*` row, `n` clears, `enter` removes the selection after a confirmation, `q` or `Esc` quits. Picking a profile that has credentials needs the word `delete` typed. `--dry-run` shows the selection without removing anything; `<agent>` limits the list. Keys are read from stdin, so it also works from a script that pipes them.
 
 Removing a profile also deletes its saved network choice (`.net/<agent>/<profile>.conf`) and calls `net-hook release <agent> <profile>`, which the example hook uses to free the reserved address. Without a terminal, `--yes` is required.
 
