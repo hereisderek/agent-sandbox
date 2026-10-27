@@ -15,7 +15,7 @@ gone() { [ ! -e "$1" ]; }
 age() { find "$1" -exec touch -h -t 202001010000 {} +; }   # make a profile look untouched for years
 
 mk() { mkdir -p "$B/$1/$2"; shift 2; for f in "$@"; do mkdir -p "$(dirname "$f")"; : > "$f"; done; }
-mk claude auth        "$B/claude/auth/.claude.json";   age "$B/claude/auth"
+mk claude auth        "$B/claude/auth/.claude.json"; echo '{"oauthAccount":{"emailAddress":"a@b.c"}}' > "$B/claude/auth/.claude.json"; age "$B/claude/auth"
 mk claude stale       "$B/claude/stale/skills/x";      age "$B/claude/stale"
 mk claude fresh       "$B/claude/fresh/skills/x"
 mk codex  authed      "$B/codex/authed/auth.json";     age "$B/codex/authed"
@@ -42,7 +42,10 @@ check "refusal deletes nothing"                test -d "$B/claude/stale"
 
 "$SB" --auto-clean claude --yes >/dev/null 2>&1
 check "--yes removes the stale profile"        gone "$B/claude/stale"
-check "its saved network choice is removed"    gone "$B/.net/claude/stale.conf"
+check "its saved network choice is moved out"  gone "$B/.net/claude/stale.conf"
+check "the profile is in the trash, contents intact" bash -c "ls '$B'/.trash/*/claude/stale/skills/x >/dev/null"
+check "its network choice is kept beside it"   bash -c "grep -q ipv6=host '$B'/.trash/*/claude/stale.net.conf"
+check "the trash is not listed as a profile"   bash -c "! '$SB' --list-profile | grep -q trash"
 check "the hook was told to release it"        grep -qx 'release claude stale' "$T/hook.log"
 check "authenticated profile kept"             test -d "$B/claude/auth"
 check "its network choice kept"                test -f "$B/.net/claude/auth.conf"
@@ -61,10 +64,35 @@ check "bad --days rejected"                    bash -c "! '$SB' --auto-clean --d
 check "unknown agent rejected"                 bash -c "! '$SB' --auto-clean nosuch >/dev/null 2>&1"
 check "nothing left to clean is not an error"  bash -c "$SB --auto-clean --yes >/dev/null"
 
+# --- Claude login detection: .claude.json exists after the first run, so it only counts with an account or key
+S="$T/status"; mkdir -p "$S"
+cj() { mkdir -p "$S/claude/$1"; printf '%s\n' "$2" > "$S/claude/$1/${3:-.claude.json}"; }
+cj first   '{"numStartups":3,"projects":{}}'
+cj oauth   '{"oauthAccount": {"emailAddress": "a@b.c"}}'
+cj nulled  '{"oauthAccount": null}'
+cj apikey  '{"primaryApiKey": "sk-ant-x"}'
+cj cred    '{"claudeAiOauth":{"accessToken":"x"}}' .credentials.json
+mkdir -p "$S/claude/emptycr"; : > "$S/claude/emptycr/.credentials.json"
+status_of() { AGENT_SANDBOX_BASE="$S" "$SB" claude --list-profile | awk -F'|' -v n="$1" '{ p=$3; gsub(/ /,"",p); if (p == n) { s=$6; gsub(/ /,"",s); print s } }'; }
+check "first-run .claude.json only: not authenticated"    test "$(status_of first)"   = Initialized
+check ".claude.json with an account: authenticated"       test "$(status_of oauth)"   = Authenticated
+check "oauthAccount null: not authenticated"              test "$(status_of nulled)"  = Initialized
+check ".claude.json with an API key: authenticated"       test "$(status_of apikey)"  = Authenticated
+check "non-empty .credentials.json: authenticated"        test "$(status_of cred)"    = Authenticated
+check "empty .credentials.json: not authenticated"        test "$(status_of emptycr)" = Initialized
+
+# restore: moving a profile back out of the trash makes it a profile again
+tdir="$(ls -d "$B"/.trash/*/ | head -1)"
+if [ -d "${tdir}claude/stale" ]; then
+  mv "${tdir}claude/stale" "$B/claude/stale"
+  check "a restored profile is listed again"       bash -c "'$SB' claude --list-profile | grep -q ' stale '"
+  rm -rf "$B/claude/stale"
+fi
+
 # --- interactive mode: keys come from stdin (one char at a time; a newline is Enter, \033[B is Down).
 #     Row order (agent, then name): 1 claude/auth  2 claude/fresh  3 claude/stale (*)  4 codex/authed  5 codex/old (*)
 rm -rf "$B"; mkdir -p "$B/.net/claude"
-mk claude auth  "$B/claude/auth/.claude.json"; age "$B/claude/auth"
+mk claude auth  "$B/claude/auth/.claude.json"; echo '{"oauthAccount":{"emailAddress":"a@b.c"}}' > "$B/claude/auth/.claude.json"; age "$B/claude/auth"
 mk claude fresh "$B/claude/fresh/skills/x"
 mk claude stale "$B/claude/stale/skills/x";    age "$B/claude/stale"
 mk codex  authed "$B/codex/authed/auth.json";  age "$B/codex/authed"

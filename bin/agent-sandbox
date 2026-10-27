@@ -80,7 +80,8 @@ USAGE:
   agent-sandbox --auto-clean [<agent>] [--days N] [--dry-run] [--yes] [-i|--interactive]
       Remove profiles that are not authenticated (status New or Initialized) and
       unchanged for N days (default 7; 0 = any age), with their saved network
-      choice and reserved address. Lists them and asks first; --dry-run only
+      choice and reserved address. Removed profiles are moved to
+      <sandbox_base>/.trash/<timestamp>/, not deleted. Lists them and asks first; --dry-run only
       lists, --yes skips the question. Authenticated profiles are never touched.
       -i/--interactive instead shows a checkbox list of ALL profiles (* marks what
       would be auto-cleaned): arrows move, space ticks, a ticks all, s ticks every *,
@@ -209,6 +210,13 @@ get_agent_binary() {
 # ------------------------------------------------------------------------------
 # Profile Status Inspector
 # ------------------------------------------------------------------------------
+# claude_json_logged_in <file>: Claude Code writes .claude.json on its first run (onboarding state,
+# project history), so the file alone proves nothing. It only means a login when it holds an
+# account (oauthAccount) or an API key (primaryApiKey). OAuth tokens themselves live in .credentials.json.
+claude_json_logged_in() {
+  [ -f "$1" ] && grep -Eq '"(oauthAccount|primaryApiKey)"[[:space:]]*:[[:space:]]*[{"]' "$1"
+}
+
 inspect_profile_status() {
   local agent="$1"
   local profile_dir="$2"
@@ -224,7 +232,7 @@ inspect_profile_status() {
       fi
       ;;
     claude)
-      if [ -f "$profile_dir/.credentials.json" ] || [ -f "$profile_dir/.claude.json" ] || [ -f "$profile_dir/claude.json" ]; then
+      if [ -s "$profile_dir/.credentials.json" ] || claude_json_logged_in "$profile_dir/.claude.json" || claude_json_logged_in "$profile_dir/claude.json"; then
         echo "Authenticated"
       elif [ -d "$profile_dir" ] && [ "$(ls -A "$profile_dir" 2>/dev/null)" ]; then
         echo "Initialized"
@@ -395,8 +403,8 @@ auto_clean() {
   [ "$dry" = 1 ] && return 0
 
   if [ "$yes" != 1 ]; then
-    [ -t 0 ] || { echo "[agent-sandbox] ERROR: not a terminal; pass --yes to delete, or --dry-run to only list" >&2; return 1; }
-    read -r -p "Delete ${#victims[@]} profile(s)? [y/N] " answer
+    [ -t 0 ] || { echo "[agent-sandbox] ERROR: not a terminal; pass --yes to remove, or --dry-run to only list" >&2; return 1; }
+    read -r -p "Move ${#victims[@]} profile(s) to the trash? [y/N] " answer
     [[ "$answer" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
   fi
 
@@ -404,14 +412,23 @@ auto_clean() {
     IFS='|' read -r ag p_name p_path <<< "$v"
     remove_profile "$ag" "$p_name" "$p_path"
   done
+  echo "Nothing was deleted: restore by moving a profile back out of $TRASH_BATCH (see README)."
 }
 
-# remove_profile <agent> <name> <dir>: the profile, its saved network choice and its reserved address
+# remove_profile <agent> <name> <dir>: move the profile to <base>/.trash/<timestamp>/<agent>/<name>
+# (one timestamp per run) with its saved network choice beside it as <name>.net.conf, and free its
+# reserved address. Nothing is deleted: restore by moving it back.
 remove_profile() {
-  rm -rf -- "$3"
-  rm -f -- "$(net_conf_file "$1" "$2")"
+  local dest conf
+  TRASH_BATCH="${TRASH_BATCH:-$SANDBOX_BASE/.trash/$(date +%Y%m%d-%H%M%S)}"
+  dest="$TRASH_BATCH/$1/$2"
+  mkdir -p "$TRASH_BATCH/$1"
+  [ ! -e "$dest" ] || dest="$dest.$$"
+  mv -- "$3" "$dest"
+  conf="$(net_conf_file "$1" "$2")"
+  [ ! -f "$conf" ] || mv -- "$conf" "$dest.net.conf"
   net_hook release "$1" "$2" >/dev/null 2>&1 || true   # frees the reserved address; no hook = nothing to free
-  echo "removed $1/$2"
+  echo "moved $1/$2 to $dest"
 }
 
 # clean_interactive <agent|all> <days> <dry_run>: checkbox list of profiles to remove.
@@ -484,10 +501,10 @@ clean_interactive() {
   if [ "$dry" = 1 ]; then echo "Dry run: nothing removed."; return 0; fi
 
   if [ "$need_word" = 1 ]; then
-    read -r -p "This includes profile(s) with credentials. Type 'delete' to confirm: " answer || answer=""
+    read -r -p "This includes profile(s) with credentials. Type 'delete' to move them to the trash: " answer || answer=""
     [ "$answer" = delete ] || { echo "Aborted."; return 1; }
   else
-    read -r -p "Delete these profile(s)? [y/N] " answer || answer=""
+    read -r -p "Move these profile(s) to the trash? [y/N] " answer || answer=""
     [[ "$answer" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
   fi
 
@@ -497,6 +514,7 @@ clean_interactive() {
     IFS='|' read -r ag p_name st mark p_path <<< "$row"
     remove_profile "$ag" "$p_name" "$p_path"
   done
+  echo "Nothing was deleted: restore by moving a profile back out of $TRASH_BATCH (see README)."
 }
 
 # ------------------------------------------------------------------------------

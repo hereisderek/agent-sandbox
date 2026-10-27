@@ -267,7 +267,7 @@ agent-sandbox --auto-clean -i                 # pick profiles by number (also --
 
 `--auto-clean` removes a profile only when both are true:
 
-- **Not authenticated.** Its status in `--list-profile` is `New` or `Initialized` (no credentials). `Authenticated`, `Active` and `Configured` profiles are never touched.
+- **Not authenticated.** Its status in `--list-profile` is `New` or `Initialized` (no credentials). `Authenticated`, `Active` and `Configured` profiles are never touched. For Claude, `.claude.json` alone does not count: Claude Code writes it on the first run, logged in or not. A profile is `Authenticated` only with a non-empty `.credentials.json`, or a `.claude.json` that holds an `oauthAccount` or `primaryApiKey`.
 - **Unused.** Nothing in it changed in the last `--days` days (default 7; `0` means any age).
 
 **Interactive mode** (`-i`) shows every profile, authenticated or not, as a checkbox list:
@@ -280,7 +280,15 @@ agent-sandbox --auto-clean -i                 # pick profiles by number (also --
 
 `●` is selected, `○` is not, `>` is the cursor, and `*` marks what plain `--auto-clean` would remove. Keys: `↑`/`↓` (or `k`/`j`) move, `space` ticks or unticks the row, `a` ticks every profile, `s` ticks only the `*` (stale) ones, `n` unticks all, `enter` removes the ticked profiles after a confirmation, `q` or `Esc` quits without removing anything. The two lines under the list name each key and show how many profiles are ticked. Picking a profile that has credentials needs the word `delete` typed. `--dry-run` shows the selection without removing anything; `<agent>` limits the list. Keys are read from stdin, so it also works from a script that pipes them.
 
-Removing a profile also deletes its saved network choice (`.net/<agent>/<profile>.conf`) and calls `net-hook release <agent> <profile>`, which the example hook uses to free the reserved address. Without a terminal, `--yes` is required.
+**Nothing is deleted.** Removed profiles are moved to `<base>/.trash/<timestamp>/<agent>/<profile>`, with the saved network choice next to it as `<profile>.net.conf` (one timestamp per run). To restore one:
+
+```bash
+base=/opt/config/agent-sandbox        # your AGENT_SANDBOX_BASE
+mv $base/.trash/20261028-010748/claude/work          $base/claude/work
+mv $base/.trash/20261028-010748/claude/work.net.conf $base/.net/claude/work.conf   # optional: its address choice
+```
+
+The trash is never emptied automatically; delete old `.trash/<timestamp>` directories yourself when you are sure. Removing a profile also moves its saved network choice (`.net/<agent>/<profile>.conf`) there and calls `net-hook release <agent> <profile>`, which the example hook uses to free the reserved address. Without a terminal, `--yes` is required.
 
 ---
 
