@@ -24,6 +24,7 @@ esac
 EOF
 cat > "$T/base/net-hook" <<EOF
 #!/bin/sh
+echo "\$*" >> "\$TESTDIR/hooklog"
 case "\$1" in
   reserve) echo $B6 ;;
   ensure) grep -qx "\$3" "\$TESTDIR/ensurable" 2>/dev/null && echo "\$3" >> "\$TESTDIR/present" ;;
@@ -176,5 +177,76 @@ AGENT_SANDBOX_DEFAULT_IPV6=new "$ROOT/bin/agent-sandbox" claude --list-profile 2
 [ ! -e "$C/ls-plain.conf" ] && ok "list: reserved and saved nothing" || bad "list: reserved and saved nothing"
 cl="$("$ROOT/bin/agent-sandbox" --auto-clean --dry-run --days 0 2>&1)"
 has      "auto-clean: shows the address" "$cl" "ipv6=$B6 (saved, not on this host)"
+
+# 15. auto / auto-strict: reuse the saved address, else reserve and save one, else host (or fail)
+C="$T/base/.net/claude"; mkdir -p "$C"
+unset AGENT_SANDBOX_DEFAULT_IPV6
+: > "$T/present"; : > "$T/ensurable"; : > "$T/hooklog"
+reserved() { grep -q '^reserve' "$T/hooklog"; }
+
+# 15a. a saved address that is present is reused, the hook is not asked
+echo "ipv6=$A6" > "$C/au1.conf"; echo "$A6" > "$T/present"
+run au1 --ipv6 auto
+hasline  "auto: reuses the saved address"   "$out" "$A6"
+has      "auto: logged as saved"            "$err" "ipv6=$A6 (saved)"
+check_not() { if "${@:2}"; then bad "$1"; else ok "$1"; fi; }
+check_not "auto: did not ask the hook to reserve" reserved
+
+# 15b. nothing saved: reserve, save, use; the next launch reuses it without the hook
+: > "$T/present"; echo "$B6" > "$T/ensurable"; : > "$T/hooklog"
+run au2 --ipv6 auto
+hasline  "auto: uses a new address"         "$out" "$B6"
+has      "auto: logged as new"              "$err" "ipv6=$B6 (new)"
+has      "auto: new address saved"          "$(conf au2)" "ipv6=$B6"
+check_not "auto: the word auto is never saved" grep -q auto "$C/au2.conf"
+: > "$T/hooklog"
+run au2 --ipv6 auto
+has      "auto: second launch reuses it"    "$err" "ipv6=$B6 (saved)"
+check_not "auto: second launch needs no reserve" reserved
+
+# 15c. a saved address that is gone and cannot be restored is replaced by a new one
+echo "ipv6=$A6" > "$C/au3.conf"; : > "$T/present"; echo "$B6" > "$T/ensurable"
+run au3 --ipv6 auto
+has      "auto: stale saved address replaced" "$err" "ipv6=$B6 (new)"
+has      "auto: replacement saved"          "$(conf au3)" "ipv6=$B6"
+
+# 15d. a saved 'host' (an explicit pin) is not an address: auto reserves one
+echo "ipv6=host" > "$C/au4.conf"; : > "$T/present"; echo "$B6" > "$T/ensurable"
+run au4 --ipv6 auto
+has      "auto: saved host is replaced by a new address" "$err" "ipv6=$B6 (new)"
+
+# 15e. last resort: no address available. auto falls back to the host, auto-strict fails
+mv "$T/base/net-hook" "$T/net-hook.off"; : > "$T/present"
+run au5 --ipv6 auto
+[ "$rc" -eq 0 ] && ok "auto: no hook is not an error" || bad "auto: no hook is not an error"
+has      "auto: warns about the host address" "$err" "using the host address"
+has      "auto: logged as fallback"         "$err" "(fallback)"
+hasnline "auto: fallback runs without pasta" "$out" pasta
+[ ! -e "$C/au5.conf" ] && ok "auto: fallback saves nothing" || bad "auto: fallback saves nothing"
+run au6 --ipv6 auto-strict
+[ "$rc" -ne 0 ] && ok "auto-strict: fails with no address" || bad "auto-strict: fails with no address"
+has      "auto-strict: says why"            "$err" "does not fall back to the host address"
+[ ! -e "$C/au6.conf" ] && ok "auto-strict: failure saves nothing" || bad "auto-strict: failure saves nothing"
+mv "$T/net-hook.off" "$T/base/net-hook"
+
+# 15f. auto-strict still reuses a saved address and still reserves when it can
+echo "ipv6=$A6" > "$C/au7.conf"; echo "$A6" > "$T/present"
+run au7 --ipv6 auto-strict
+[ "$rc" -eq 0 ] && has "auto-strict: reuses the saved address" "$err" "ipv6=$A6 (saved)" || bad "auto-strict: reuses the saved address"
+: > "$T/present"; echo "$B6" > "$T/ensurable"
+run au8 --ipv6 auto-strict
+has      "auto-strict: reserves when nothing is saved" "$err" "ipv6=$B6 (new)"
+
+# 15g. as a default policy, and for IPv4 (the example hook only answers IPv6: host fallback)
+: > "$T/present"; echo "$B6" > "$T/ensurable"
+AGENT_SANDBOX_DEFAULT_IPV6=auto run au9
+has      "policy auto: reserves and saves"  "$(conf au9)" "ipv6=$B6"
+run au10 --ipv4 auto
+[ "$rc" -eq 0 ] && has "ipv4 auto: an invalid hook answer falls back to the host" "$err" "ipv4=172.16.2.26 (fallback)" || bad "ipv4 auto: falls back to the host"
+run au11 --ipv6 bogus
+has      "invalid value lists auto-strict"  "$err" "auto-strict"
+listing="$("$ROOT/bin/agent-sandbox" claude --list-profile 2>&1)"
+AGENT_SANDBOX_DEFAULT_IPV6=auto "$ROOT/bin/agent-sandbox" claude --list-profile 2>&1 | grep -qF "ipv6=auto (reserved on first launch)" \
+  && ok "list: policy auto shown as pending" || bad "list: policy auto shown as pending"
 
 exit $fail

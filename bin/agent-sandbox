@@ -63,8 +63,10 @@ USAGE:
       Choose the address the profile uses for outbound traffic. <v> is an
       address, 'host' (host routing), 'none'/'null' (disable that family),
       'new' (reserve one through the net hook; the same profile always gets the
-      same address) or 'default' (forget the saved choice, use the default
-      policy). The choice is saved per agent/profile and reused next time. With
+      same address), 'auto' (reuse the saved address, else reserve and save a new
+      one, else the host address), 'auto-strict' (like auto but fail instead of
+      using the host address) or 'default' (forget the saved choice, use the
+      default policy). The choice is saved per agent/profile and reused next time. With
       no flag and nothing saved, the default policy applies: AGENT_SANDBOX_DEFAULT_IPV4/6
       (or <sandbox_base>/.net/defaults.conf), 'host' when unset. A saved address
       that is no longer available falls back to the host address (logged).
@@ -543,7 +545,7 @@ net_norm() {
   local v
   v="$(printf '%s' "$2" | tr 'A-Z' 'a-z')"
   case "$v" in
-    default|host|none|new) echo "$v"; return 0 ;;
+    default|host|none|new|auto|auto-strict) echo "$v"; return 0 ;;
     null) echo none; return 0 ;;
   esac
   case "$1" in
@@ -556,7 +558,7 @@ net_norm() {
 # net_flag <--ipv4|--ipv6> <value>: record a command-line choice
 net_flag() {
   local fam="${1#--}" v
-  v="$(net_norm "$fam" "$2")" || net_die "invalid value '$2' for $1 (address, host, none, new or default)"
+  v="$(net_norm "$fam" "$2")" || net_die "invalid value '$2' for $1 (address, host, none, new, auto, auto-strict or default)"
   printf -v "NET_FLAG_$fam" %s "$v"
 }
 
@@ -613,13 +615,13 @@ net_describe() {
   local fam v src out="" saved
   for fam in ipv4 ipv6; do
     saved="$(net_norm "$fam" "$(net_conf_get "$(net_conf_file "$1" "$2")" "$fam")" 2>/dev/null || true)"
-    case "$saved" in ""|new|default) saved="" ;; esac
+    case "$saved" in ""|new|auto|auto-strict|default) saved="" ;; esac
     if [ -n "$saved" ]; then v="$saved"; src=saved
     else v="$(net_policy "$fam" 2>/dev/null)"; src="default policy"
     fi
     case "$v" in
       host) v="$(net_default_addr "$fam")"; if [ -n "$v" ]; then src=host; else v=host; src=""; fi ;;
-      new)  src="reserved on first launch" ;;
+      new|auto|auto-strict) src="reserved on first launch" ;;
       none) ;;
       *)    # an address that is not on this host will fall back to the host address at launch
             if command -v ip >/dev/null 2>&1 && ! net_present "$v"; then src+=", not on this host"; fi ;;
@@ -630,14 +632,14 @@ net_describe() {
 }
 
 # net_resolve <family> <flag> <conf> <agent> <profile>
-# Sets NET_VAL_<family> and NET_SRC_<family> (flag|saved|auto|default|fallback).
+# Sets NET_VAL_<family> and NET_SRC_<family> (flag|saved|new|auto|default|fallback).
 net_resolve() {
   local fam="$1" flag="$2" conf="$3" agent="$4" profile="$5" want src saved persist=0
   saved="$(net_conf_get "$conf" "$fam")"
   if [ -n "$saved" ]; then
     saved="$(net_norm "$fam" "$saved" || true)"
     case "$saved" in
-      ""|new|default) net_log "WARN: ignoring invalid saved $fam in $conf"; saved="" ;;
+      ""|new|auto|auto-strict|default) net_log "WARN: ignoring invalid saved $fam in $conf"; saved="" ;;
     esac
   fi
 
@@ -650,6 +652,37 @@ net_resolve() {
     want="$(net_policy "$fam")"; src=auto
     if [ "$want" = host ]; then src=default; fi
   fi
+
+  # auto / auto-strict: reuse the saved address, else reserve and save a new one, else the host
+  # address (auto-strict fails instead). Only an address is ever saved, never the word auto.
+  case "$want" in
+    auto|auto-strict)
+      local mode="$want" cand="" how=""
+      case "$saved" in ""|host|none) ;; *) cand="$saved"; how=saved ;; esac
+      if [ -n "$cand" ]; then
+        net_present "$cand" || net_hook ensure "$fam" "$cand" "$agent" "$profile" >/dev/null 2>&1 || true
+        net_present "$cand" || cand=""
+      fi
+      if [ -z "$cand" ]; then
+        how=new
+        cand="$(net_hook reserve "$fam" "$agent" "$profile" 2>/dev/null || true)"
+        cand="$(net_norm "$fam" "$cand" 2>/dev/null || true)"
+        case "$cand" in ""|default|host|none|new|auto|auto-strict) cand="" ;; esac
+        if [ -n "$cand" ]; then
+          net_present "$cand" || net_hook ensure "$fam" "$cand" "$agent" "$profile" >/dev/null 2>&1 || true
+          net_present "$cand" || cand=""
+        fi
+      fi
+      if [ -n "$cand" ]; then
+        want="$cand"; src="$how"; persist=1
+      elif [ "$mode" = auto-strict ]; then
+        net_die "no $fam address for $agent/$profile: none saved and usable, and none could be reserved (auto-strict does not fall back to the host address)"
+      else
+        net_log "WARN: no $fam address could be reused or reserved for $agent/$profile, using the host address"
+        want=host; src=fallback
+      fi
+      ;;
+  esac
 
   if [ "$want" = new ]; then
     if [ "$src" = auto ]; then persist=1; fi
@@ -1079,7 +1112,7 @@ main() {
         ;;
       --ipv4|--ipv6)
         if [ $# -lt 2 ]; then
-          echo "[agent-sandbox] ERROR: $1 requires a value (address, host, none, new or default)" >&2
+          echo "[agent-sandbox] ERROR: $1 requires a value (address, host, none, new, auto, auto-strict or default)" >&2
           exit 1
         fi
         net_flag "$1" "$2"

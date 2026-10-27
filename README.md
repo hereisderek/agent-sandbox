@@ -136,6 +136,8 @@ Each profile can use its own outbound address per IP family:
 
 ```bash
 agent-sandbox claude --profile work --ipv6 new                 # reserve an address via the net hook
+agent-sandbox claude --profile work --ipv6 auto                # reuse saved, else reserve and save, else host
+agent-sandbox claude --profile work --ipv6 auto-strict         # same, but fail instead of using the host
 agent-sandbox claude --profile work --ipv6 2404:4400:4172:e900:ffff:ffff:ffff:ff00
 agent-sandbox claude --profile work --ipv4 none                # no IPv4 for this profile
 agent-sandbox claude --profile work --ipv6 host                # pin the host's own address
@@ -148,7 +150,24 @@ agent-sandbox claude --profile work --ipv6 default             # forget the save
 | `host` | No binding: the host's own address, as without any feature. |
 | `none` / `null` | Disable that family for the profile. |
 | `new` | Ask the net hook to reserve an address, then use it. Safe to repeat: the hook gives the same profile the same address. |
+| `auto` | Do the first that works: **1.** reuse the address already saved for the profile, **2.** reserve a new available one through the net hook, save it and use it, **3.** use the host's address (logged as `fallback`, nothing saved). A saved `host` or `none` is not an address, so `auto` replaces it. |
+| `auto-strict` | Like `auto`, but step 3 is an error: the launch fails with a message and nothing is saved, so a profile never silently runs on the host address. |
 | `default` | Forget the saved choice and apply the default policy (below). |
+
+**Recommended: `auto`.** One flag that gives every profile its own address and never leaves it unset:
+
+```bash
+agent-sandbox codex --profile work --ipv6 auto
+# first launch    -> reserves 2404:…:ff3a through the net hook, saves it, uses it   (new)
+# later launches  -> reuses the saved address, the hook is not asked                 (saved)
+# no hook / pool full / address cannot be restored
+#                 -> warns and uses the host address, nothing saved                  (fallback)
+
+agent-sandbox codex --profile work --ipv6 auto-strict
+# same, but the last case is an error: the launch stops instead of using the host address
+```
+
+Use `auto-strict` when a profile must never go out on the host address (for example a profile tied to an allow-listed address). Set `AGENT_SANDBOX_DEFAULT_IPV6=auto` (or `auto-strict`) to apply it to every profile without a flag.
 
 **One command, no flags.** Set the default policy and every profile gets its own address automatically:
 
@@ -161,7 +180,7 @@ agent-sandbox claude --profile work       # later launches: reuses it
 The policy applies to a profile with no flag and nothing saved. It can be `new`, `none`, an address or `host` (the default when unset). Only a reserved `new` address is saved, so changing the policy later does not move profiles that already have one. The environment variable overrides `defaults.conf`. `--ipv6 default` on a profile re-applies the policy: with `new`, the hook returns the profile's existing address.
 
 - **Saved per profile.** An explicit flag is stored in `<sandbox_base>/.net/<agent>/<profile>.conf` and used on later launches. If a saved address is no longer available (and the hook cannot restore it), the profile falls back to the host address for that family and logs a warning. The saved value is kept.
-- **Every launch logs what it uses**, to stderr: `[agent-sandbox] net claude/work: ipv4=172.16.2.26 (default) ipv6=2404:…:ff00 (saved)`. The source is `flag`, `saved`, `auto` (from the default policy), `default` (host address) or `fallback`.
+- **Every launch logs what it uses**, to stderr: `[agent-sandbox] net claude/work: ipv4=172.16.2.26 (default) ipv6=2404:…:ff00 (saved)`. The source is `flag`, `saved`, `new` (just reserved by `auto`), `auto` (from the default policy), `default` (host address) or `fallback` (the wanted address was unavailable, so the host address is used).
 - **Resolution order:** flag, then saved, then the default policy. With both families on `host`, nothing changes: the agent shares the host network.
 - `--list-profile` prints a `Network:` block under the table with the address each profile uses, e.g. `claude/work: ipv4=172.16.2.26 (host)  ipv6=2404:…:ff3a (saved)`. The label says where it comes from: `saved`, `host`, `default policy`, or `reserved on first launch` (policy `new`, nothing saved yet); `not on this host` means a saved address that a launch would replace with the host address. `--auto-clean` (and its `-i` list) shows the same information. Showing it never reserves or saves anything. Inside the sandbox the config is read-only (`/opt` is mounted read-only).
 - The sandbox sees `AGENT_SANDBOX_IPV4` and `AGENT_SANDBOX_IPV6` (`host`, `none` or the address).
