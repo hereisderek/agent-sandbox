@@ -61,4 +61,45 @@ check "bad --days rejected"                    bash -c "! '$SB' --auto-clean --d
 check "unknown agent rejected"                 bash -c "! '$SB' --auto-clean nosuch >/dev/null 2>&1"
 check "nothing left to clean is not an error"  bash -c "$SB --auto-clean --yes >/dev/null"
 
+# --- interactive mode: answers come from stdin. Listing order (agent, then name):
+#     1 claude/auth  2 claude/fresh  3 claude/stale (*)  4 codex/authed  5 codex/old (*)
+rm -rf "$B"; mkdir -p "$B/.net/claude"
+mk claude auth  "$B/claude/auth/.claude.json"; age "$B/claude/auth"
+mk claude fresh "$B/claude/fresh/skills/x"
+mk claude stale "$B/claude/stale/skills/x";    age "$B/claude/stale"
+mk codex  authed "$B/codex/authed/auth.json";  age "$B/codex/authed"
+mk codex  old    "$B/codex/old/tmp/x";         age "$B/codex/old"
+echo ipv6=host > "$B/.net/claude/stale.conf"; : > "$T/hook.log"
+ia() { printf '%s\n' "$@" | "$SB" --auto-clean -i 2>&1; }
+
+out="$(ia q)"
+check "interactive lists all profiles"          bash -c "[ \$(grep -cE '^ *[0-9]+\)' <<< '$out') -eq 5 ]"
+check "flagged ones carry a *"                  grep -qE '[0-9]\) \* claude +stale' <<< "$out"
+check "authenticated ones are not flagged"      bash -c "! grep -qE '[0-9]\) \* +(claude +auth|codex +authed)' <<< '$out'"
+check "q removes nothing"                       test -d "$B/claude/stale"
+
+ia 2 n >/dev/null
+check "answering n removes nothing"             test -d "$B/claude/fresh"
+check "out-of-range returns failure"            bash -c "! printf '99\n' | '$SB' --auto-clean -i >/dev/null 2>&1"
+check "bad token returns failure"               bash -c "! printf 'x1\n' | '$SB' --auto-clean -i >/dev/null 2>&1"
+check "trailing hyphen returns failure"         bash -c "! printf '3-\n' | '$SB' --auto-clean -i >/dev/null 2>&1"
+
+ia 2 y >/dev/null
+check "picking an unflagged unauthenticated profile removes it (fresh)" test ! -e "$B/claude/fresh"
+
+printf 'a\ny\n' | "$SB" --auto-clean -i >/dev/null 2>&1
+check "a removes every * profile"               test ! -e "$B/claude/stale" -a ! -e "$B/codex/old"
+check "its saved network choice is removed"     test ! -e "$B/.net/claude/stale.conf"
+check "the hook was told to release it"         grep -qx 'release claude stale' "$T/hook.log"
+check "authenticated profiles survive a"        test -d "$B/claude/auth" -a -d "$B/codex/authed"
+
+printf '1\ny\n' | "$SB" --auto-clean -i >/dev/null 2>&1
+check "authenticated pick: y is not enough"     test -d "$B/claude/auth"
+printf '1\ndelete\n' | "$SB" --auto-clean -i >/dev/null 2>&1
+check "authenticated pick: typing delete removes it" test ! -e "$B/claude/auth"
+printf '1-2\n' | "$SB" --auto-clean -i --dry-run >/dev/null 2>&1
+check "--dry-run with -i removes nothing"       test -d "$B/codex/authed"
+printf 'q\n' | "$SB" --auto-clean codex --interactive >/dev/null 2>&1
+check "--interactive and an agent filter work"  test -d "$B/codex/authed"
+
 exit $fail

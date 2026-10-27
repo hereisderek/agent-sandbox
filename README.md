@@ -243,12 +243,15 @@ agent-sandbox --auto-clean --dry-run          # list what would be removed
 agent-sandbox --auto-clean                    # list, ask, then remove
 agent-sandbox --auto-clean codex --days 30    # one agent, unused for 30+ days
 agent-sandbox --auto-clean --yes              # no question (for cron)
+agent-sandbox --auto-clean -i                 # pick profiles by number (also --interactive)
 ```
 
 `--auto-clean` removes a profile only when both are true:
 
 - **Not authenticated.** Its status in `--list-profile` is `New` or `Initialized` (no credentials). `Authenticated`, `Active` and `Configured` profiles are never touched.
 - **Unused.** Nothing in it changed in the last `--days` days (default 7; `0` means any age).
+
+**Interactive mode** (`-i`) shows every profile, authenticated or not, in a numbered list. `*` marks what plain `--auto-clean` would remove. Answer with numbers or ranges (`1,3-5`), `a` for all `*` rows, or `q` to quit, then confirm. Picking a profile that has credentials needs the word `delete` typed. `--dry-run` shows the selection without removing anything; `<agent>` limits the list. Input is read from stdin.
 
 Removing a profile also deletes its saved network choice (`.net/<agent>/<profile>.conf`) and calls `net-hook release <agent> <profile>`, which the example hook uses to free the reserved address. Without a terminal, `--yes` is required.
 
