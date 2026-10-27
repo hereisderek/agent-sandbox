@@ -189,7 +189,7 @@ net-hook ensure  <ipv4|ipv6> <addr> [<agent> <profile>]   make the address usabl
 
 [`examples/net-hook-lxc.sh`](examples/net-hook-lxc.sh) handles IPv6 for a host or LXC with a SLAAC `/64`. It allocates interface IDs from a range inside that `/64`, adds each address to the interface as a deprecated `/128` (so the kernel never uses it as a default source), and records profile to ID in `<sandbox_base>/.net/ipv6.registry`. The default range is the 128 addresses `…:ff00` to `…:ff7f` at the top of the `/64`; the top 128 IDs of a `/64` are reserved anycast and are never used. To grow the pool, lower the start, for example `AGENT_SANDBOX_V6_POOL=ffff:ffff:fff0:0000-ffff:ffff:ffff:ff7f`. Existing assignments do not move. It needs no router change because the addresses are on-link. IPv4 is not handled by the example: pass an address that already exists on the host.
 
-Tests: `bash tests/net.sh` and `bash tests/hook.sh` (no root or network needed).
+Tests: `bash tests/net.sh`, `bash tests/hook.sh` and `bash tests/clean.sh` (no root or network needed).
 
 ---
 
@@ -233,6 +233,24 @@ export AGENT_SANDBOX_BASE="$HOME/.local/share/agent-sandbox" AGENT_SANDBOX_SKILL
 ### Dedicated IPv6 (optional)
 
 If `net.env` (in the base directory, or the file named by `AGENT_SANDBOX_NET_ENV`) sets `SANDBOX_IPV6=<address>`, `agent-sandbox` runs `bwrap` under `pasta` (package `passt`) so outbound sockets bind to that address and only the sandbox uses it. The sandbox then no longer shares the host's `localhost`. It fails with a clear error if `pasta` is missing. It is a fallback: a profile with its own `--ipv4`/`--ipv6` setting (see Per-Profile IPv4 / IPv6) takes precedence. Without `net.env` nothing changes.
+
+---
+
+## Cleaning up profiles
+
+```bash
+agent-sandbox --auto-clean --dry-run          # list what would be removed
+agent-sandbox --auto-clean                    # list, ask, then remove
+agent-sandbox --auto-clean codex --days 30    # one agent, unused for 30+ days
+agent-sandbox --auto-clean --yes              # no question (for cron)
+```
+
+`--auto-clean` removes a profile only when both are true:
+
+- **Not authenticated.** Its status in `--list-profile` is `New` or `Initialized` (no credentials). `Authenticated`, `Active` and `Configured` profiles are never touched.
+- **Unused.** Nothing in it changed in the last `--days` days (default 7; `0` means any age).
+
+Removing a profile also deletes its saved network choice (`.net/<agent>/<profile>.conf`) and calls `net-hook release <agent> <profile>`, which the example hook uses to free the reserved address. Without a terminal, `--yes` is required.
 
 ---
 

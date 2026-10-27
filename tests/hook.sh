@@ -16,6 +16,7 @@ case "$*" in
     echo "2: eth0    inet6 2404:4400:4172:e900:be24:11ff:fe9e:3e48/64 scope global dynamic mngtmpaddr" ;;
   "-o addr show to "*) grep -qx "$5" "$TESTDIR/present" 2>/dev/null && echo "2: eth0 inet6 $5/128 scope global" ;;
   "-6 addr add "*) echo "$*" >> "$TESTDIR/added"; echo "${4%/128}" >> "$TESTDIR/present" ;;
+  "-6 addr del "*) echo "${4%/128}" >> "$TESTDIR/deleted" ;;
 esac
 EOF
 printf '#!/bin/sh\n[ "$1" = -n ] && shift\nexec "$@"\n' > "$T/bin/sudo"
@@ -72,5 +73,12 @@ check "ensure refuses another prefix" bash -c "! bash '$HOOK' ensure ipv6 2001:d
 check "ensure refuses outside the pool" bash -c "! bash '$HOOK' ensure ipv6 $PFX:1:2:3:4 2>/dev/null"
 check "ensure refuses anycast" bash -c "! bash '$HOOK' ensure ipv6 $PFX:ffff:ffff:ffff:ff90 2>/dev/null"
 check "ipv4 is refused" bash -c "! bash '$HOOK' reserve ipv4 x y 2>/dev/null"
+
+# release: frees the profile's id and drops the address; unknown profile is a no-op
+check "release a registered profile" bash "$HOOK" release x a
+check "release: registry line gone" bash -c "! grep -q '^x/a' '$T/base/.net/ipv6.registry'"
+check "release: address deleted" grep -qx "$b1" "$T/deleted"
+check "release: other profiles kept" grep -q '^x/b' "$T/base/.net/ipv6.registry"
+check "release an unknown profile is a no-op" bash "$HOOK" release x nope
 
 exit $fail

@@ -75,6 +75,12 @@ USAGE:
   agent-sandbox --list-profile
       List profiles across all supported agents.
 
+  agent-sandbox --auto-clean [<agent>] [--days N] [--dry-run] [--yes]
+      Remove profiles that are not authenticated (status New or Initialized) and
+      unchanged for N days (default 7; 0 = any age), with their saved network
+      choice and reserved address. Lists them and asks first; --dry-run only
+      lists, --yes skips the question. Authenticated profiles are never touched.
+
 SUPPORTED AGENTS & ALIASES:
   antigravity, agy    -> Google Antigravity CLI
   claude, claude-code -> Anthropic Claude Code
@@ -352,6 +358,49 @@ list_profiles() {
     [ -s "$r_conf" ] || continue
     if [ "$net_hdr" -eq 0 ]; then echo "Network overrides:"; net_hdr=1; fi
     printf '  %s/%s: %s\n' "$r_ag" "$r_name" "$(tr '\n' ' ' < "$r_conf")"
+  done
+}
+
+# ------------------------------------------------------------------------------
+# Auto-clean: remove profiles that are unused and not authenticated
+# ------------------------------------------------------------------------------
+# auto_clean <agent|all> <days> <dry_run> <yes>
+# A profile is removed when its status is New or Initialized (no credentials, see
+# inspect_profile_status) and nothing in it changed in the last <days> days.
+auto_clean() {
+  local target="$1" days="$2" dry="$3" yes="$4"
+  local agents=() victims=() ag p_path p_name v answer
+  if [ "$target" = all ]; then agents=(antigravity claude codex opencode opencode2 pi orca); else agents=("$target"); fi
+
+  for ag in "${agents[@]}"; do
+    for p_path in "$SANDBOX_BASE/$ag"/*; do
+      [ -d "$p_path" ] && [ ! -L "$p_path" ] || continue
+      case "$(inspect_profile_status "$ag" "$p_path")" in New|Initialized) ;; *) continue ;; esac
+      [ -z "$(find "$p_path" -mtime "-$days" -print -quit 2>/dev/null)" ] || continue
+      victims+=("$ag|$(basename "$p_path")|$p_path")
+    done
+  done
+
+  if [ ${#victims[@]} -eq 0 ]; then
+    echo "Nothing to clean (no unauthenticated profile unused for $days+ days)."
+    return 0
+  fi
+  echo "Unauthenticated profiles unused for $days+ days:"
+  for v in "${victims[@]}"; do IFS='|' read -r ag p_name p_path <<< "$v"; printf '  %s/%s  (%s)\n' "$ag" "$p_name" "$p_path"; done
+  [ "$dry" = 1 ] && return 0
+
+  if [ "$yes" != 1 ]; then
+    [ -t 0 ] || { echo "[agent-sandbox] ERROR: not a terminal; pass --yes to delete, or --dry-run to only list" >&2; return 1; }
+    read -r -p "Delete ${#victims[@]} profile(s)? [y/N] " answer
+    [[ "$answer" =~ ^[Yy]$ ]] || { echo "Aborted."; return 1; }
+  fi
+
+  for v in "${victims[@]}"; do
+    IFS='|' read -r ag p_name p_path <<< "$v"
+    rm -rf -- "$p_path"
+    rm -f -- "$(net_conf_file "$ag" "$p_name")"
+    net_hook release "$ag" "$p_name" >/dev/null 2>&1 || true   # frees the reserved address; no hook = nothing to free
+    echo "removed $ag/$p_name"
   done
 }
 
@@ -856,6 +905,24 @@ main() {
     --list-profile|--list-profiles|--list)
       list_profiles "all"
       exit 0
+      ;;
+    --auto-clean)
+      shift
+      local ac_agent=all ac_days=7 ac_dry=0 ac_yes=0
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --days)    ac_days="${2:-}"; shift $(( $# > 1 ? 2 : 1 )) ;;
+          --days=*)  ac_days="${1#--days=}"; shift ;;
+          --dry-run) ac_dry=1; shift ;;
+          --yes)     ac_yes=1; shift ;;
+          *)         ac_agent="$(resolve_agent "$1")"
+                     [ -n "$ac_agent" ] || { echo "[agent-sandbox] ERROR: --auto-clean: unknown option or agent '$1'" >&2; exit 1; }
+                     shift ;;
+        esac
+      done
+      [[ "$ac_days" =~ ^[0-9]+$ ]] || { echo "[agent-sandbox] ERROR: --days needs a whole number" >&2; exit 1; }
+      auto_clean "$ac_agent" "$ac_days" "$ac_dry" "$ac_yes"
+      exit $?
       ;;
   esac
 

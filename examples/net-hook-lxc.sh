@@ -8,6 +8,8 @@
 #       Print an address for the profile. The same profile always gets the same one.
 #   net-hook ensure  <ipv4|ipv6> <addr> [<agent> <profile>]
 #       Make <addr> usable on this host now (for example after a reboot). Exit 0 = usable.
+#   net-hook release <agent> <profile>
+#       Optional. Called when a profile is deleted (--auto-clean): free its address.
 #
 # IPv6: addresses come from a range of interface IDs inside the interface's own /64.
 # The /64 is read from the interface's SLAAC address, so a renumbered prefix needs
@@ -127,12 +129,25 @@ reserve_v6() {
   echo "$addr"
 }
 
+# release_v6 <agent> <profile>: forget the profile's ID (frees it for reuse) and drop the address
+release_v6() {
+  local key="$1/$2" fmt
+  [ -f "$REGISTRY" ] || return 0
+  if command -v flock >/dev/null 2>&1; then exec 9>"$REGISTRY.lock"; flock 9; fi
+  fmt="$(registry_iid "$key")"
+  [ -n "$fmt" ] || return 0
+  awk -F'\t' -v k="$key" '$1 != k' "$REGISTRY" > "$REGISTRY.tmp" && mv "$REGISTRY.tmp" "$REGISTRY"
+  # best effort: the address is only a deprecated /128 and goes away on reboot anyway
+  ( iface_init; as_root ip -6 addr del "$(v6_prefix):$fmt/128" dev "$IFACE" ) 2>/dev/null || true
+}
+
 main() {
   case "${1:-}/${2:-}" in
+    release/*)    release_v6 "${2:?agent}" "${3:?profile}" ;;
     reserve/ipv6) reserve_v6 "${3:?agent}" "${4:?profile}" ;;
     ensure/ipv6)  ensure_v6 "${3:?addr}" ;;
     reserve/ipv4|ensure/ipv4) die "IPv4 is not handled by this example hook" ;;
-    *) die "usage: net-hook reserve|ensure <ipv4|ipv6> ..." ;;
+    *) die "usage: net-hook reserve|ensure <ipv4|ipv6> ... | release <agent> <profile>" ;;
   esac
 }
 
