@@ -59,6 +59,16 @@ USAGE:
       Launch the agent inside an isolated Bubblewrap sandbox under
       <sandbox_base>/<agent>/<profile_name>.
 
+  agent-sandbox <agent> --profile <profile_name> [--ipv4 <v>] [--ipv6 <v>] [args...]
+      Choose the address the profile uses for outbound traffic. <v> is an
+      address, 'host' (host routing), 'none'/'null' (disable that family),
+      'new' (reserve one through the net hook; the same profile always gets the
+      same address) or 'default' (forget the saved choice, use the default
+      policy). The choice is saved per agent/profile and reused next time. With
+      no flag and nothing saved, the default policy applies: AGENT_SANDBOX_DEFAULT_IPV4/6
+      (or <sandbox_base>/.net/defaults.conf), 'host' when unset. A saved address
+      that is no longer available falls back to the host address (logged).
+
   agent-sandbox <agent> [args...]
       Run the agent command directly on the host (passes through all arguments).
 
@@ -79,8 +89,17 @@ ENVIRONMENT VARIABLES:
   AGENT_SANDBOX_OWNER   Primary user name (default: current user)
   AGENT_SANDBOX_SKILLS  Skills directory linked into new profiles (default: /opt/config/.agents/skills or ~/.agents/skills)
   AGENT_SANDBOX_NET_ENV File that may set SANDBOX_IPV6 (default: <sandbox_base>/net.env)
+  AGENT_SANDBOX_NET_HOOK  Executable that reserves/ensures addresses
+                          (default: <sandbox_base>/net-hook; see examples/)
+  AGENT_SANDBOX_DEFAULT_IPV4 / AGENT_SANDBOX_DEFAULT_IPV6
+                          Default policy for profiles with no flag and nothing
+                          saved: new, none, an address, or host (default)
+  AGENT_SANDBOX_DRY_RUN   1 = print the final command instead of running it
 
 EXAMPLES:
+  agent-sandbox claude --profile work --ipv6 new
+  agent-sandbox claude --profile work --ipv4 none
+  AGENT_SANDBOX_DEFAULT_IPV6=new agent-sandbox claude --profile work   (auto-reserve once, then reuse)
   agent-sandbox claude --list-profile
   agent-sandbox agy --profile work -p "Check git status"
   agent-sandbox claude --profile personal
@@ -324,6 +343,16 @@ list_profiles() {
     printf "| %-11s | %-20s | %-8s | %-17s | %-14s | %-59s |\n" "$r_ag" "$r_name" "$r_size" "$r_mod" "$r_stat" "$r_dir"
   done
   echo "+-------------+----------------------+----------+-------------------+----------------+-------------------------------------------------------------+"
+
+  # Saved per-profile network choices (see --ipv4/--ipv6)
+  local net_hdr=0 r_conf
+  for row in "${rows[@]}"; do
+    IFS='|' read -r r_ag r_name _ <<< "$row"
+    r_conf="$(net_conf_file "$r_ag" "$r_name")"
+    [ -s "$r_conf" ] || continue
+    if [ "$net_hdr" -eq 0 ]; then echo "Network overrides:"; net_hdr=1; fi
+    printf '  %s/%s: %s\n' "$r_ag" "$r_name" "$(tr '\n' ' ' < "$r_conf")"
+  done
 }
 
 # ------------------------------------------------------------------------------
@@ -353,6 +382,169 @@ run_direct() {
 }
 
 # ------------------------------------------------------------------------------
+# Per-profile network (IPv4 / IPv6)
+# ------------------------------------------------------------------------------
+# Each family is "host" (host routing), "none" (disabled) or an address.
+# Resolution order: --ipv4/--ipv6 flag, saved config, default. Any non-default
+# value runs the agent under pasta (userspace netns) with outbound sockets bound
+# to the address. Addresses are reserved by an optional hook, see examples/.
+NET_DIR="$SANDBOX_BASE/.net"
+DRY_RUN="${AGENT_SANDBOX_DRY_RUN:-0}"
+NET_PREFIX=()
+NET_BWRAP=()
+
+net_log() { echo "[agent-sandbox] $*" >&2; }
+net_die() { net_log "ERROR: $*"; exit 1; }
+
+# net_norm <ipv4|ipv6> <value>: print the normalized value, fail if invalid
+net_norm() {
+  local v
+  v="$(printf '%s' "$2" | tr 'A-Z' 'a-z')"
+  case "$v" in
+    default|host|none|new) echo "$v"; return 0 ;;
+    null) echo none; return 0 ;;
+  esac
+  case "$1" in
+    ipv4) [[ "$v" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1 ;;
+    ipv6) [[ "$v" =~ ^[0-9a-f:]+$ && "$v" == *:* ]] || return 1 ;;
+  esac
+  echo "$v"
+}
+
+# net_flag <--ipv4|--ipv6> <value>: record a command-line choice
+net_flag() {
+  local fam="${1#--}" v
+  v="$(net_norm "$fam" "$2")" || net_die "invalid value '$2' for $1 (address, host, none, new or default)"
+  printf -v "NET_FLAG_$fam" %s "$v"
+}
+
+# net_policy <family>: what a profile with no flag and nothing saved gets.
+# AGENT_SANDBOX_DEFAULT_IPV4/6 or <base>/.net/defaults.conf; 'host' when unset.
+net_policy() {
+  local v=""
+  case "$1" in
+    ipv4) v="${AGENT_SANDBOX_DEFAULT_IPV4:-}" ;;
+    ipv6) v="${AGENT_SANDBOX_DEFAULT_IPV6:-}" ;;
+  esac
+  [ -n "$v" ] || v="$(net_conf_get "$NET_DIR/defaults.conf" "$1")"
+  [ -n "$v" ] || { echo host; return 0; }
+  v="$(net_norm "$1" "$v" || true)"
+  case "$v" in
+    ""|default) net_log "WARN: ignoring invalid default policy for $1"; echo host ;;
+    *) echo "$v" ;;
+  esac
+}
+
+net_conf_file() { echo "$NET_DIR/$1/${2//\//_}.conf"; }
+
+net_conf_get() { { [ -f "$1" ] && sed -n "s/^$2=//p" "$1" | tail -n 1; } || true; }
+
+# net_conf_set <file> <family> <value>: empty value removes the key
+net_conf_set() {
+  local tmp
+  mkdir -p "$(dirname "$1")"
+  tmp="$(mktemp "$1.XXXXXX")"
+  { { [ -f "$1" ] && grep -v "^$2=" "$1"; } || true; [ -z "$3" ] || echo "$2=$3"; } > "$tmp"
+  mv "$tmp" "$1"
+}
+
+# net_hook <action> <args...>: 127 when no hook is installed
+net_hook() {
+  local hook="${AGENT_SANDBOX_NET_HOOK:-$SANDBOX_BASE/net-hook}"
+  [ -x "$hook" ] || return 127
+  AGENT_SANDBOX_BASE="$SANDBOX_BASE" "$hook" "$@"
+}
+
+net_present() { [ -n "$(ip -o addr show to "$1" 2>/dev/null)" ]; }
+
+# net_default_addr <ipv4|ipv6>: source address the host would pick, best effort
+net_default_addr() {
+  local fam=-4 dst=1.1.1.1
+  if [ "$1" = ipv6 ]; then fam=-6; dst=2606:4700:4700::1111; fi
+  ip "$fam" route get "$dst" 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n 1 || true
+}
+
+# net_resolve <family> <flag> <conf> <agent> <profile>
+# Sets NET_VAL_<family> and NET_SRC_<family> (flag|saved|auto|default|fallback).
+net_resolve() {
+  local fam="$1" flag="$2" conf="$3" agent="$4" profile="$5" want src saved persist=0
+  saved="$(net_conf_get "$conf" "$fam")"
+  if [ -n "$saved" ]; then
+    saved="$(net_norm "$fam" "$saved" || true)"
+    case "$saved" in
+      ""|new|default) net_log "WARN: ignoring invalid saved $fam in $conf"; saved="" ;;
+    esac
+  fi
+
+  # 'default' forgets the saved choice and falls back to the default policy
+  if [ "$flag" = default ]; then flag=""; saved=""; net_conf_set "$conf" "$fam" ""; fi
+
+  if [ -n "$flag" ]; then want="$flag"; src=flag; persist=1
+  elif [ -n "$saved" ]; then want="$saved"; src=saved
+  else
+    want="$(net_policy "$fam")"; src=auto
+    if [ "$want" = host ]; then src=default; fi
+  fi
+
+  if [ "$want" = new ]; then
+    if [ "$src" = auto ]; then persist=1; fi
+    want="$(net_hook reserve "$fam" "$agent" "$profile")" \
+      || net_die "cannot reserve a new $fam address (is AGENT_SANDBOX_NET_HOOK set? see examples/)"
+    want="$(net_norm "$fam" "$want")" || net_die "net hook returned an invalid $fam address"
+    case "$want" in default|host|none|new) net_die "net hook returned '$want', expected an address" ;; esac
+  fi
+
+  case "$want" in
+    host|none) ;;
+    *)
+      net_present "$want" || net_hook ensure "$fam" "$want" "$agent" "$profile" >/dev/null || true
+      if ! net_present "$want"; then
+        if [ "$src" = flag ]; then net_die "$fam address $want is not configured on this host"; fi
+        net_log "WARN: $fam $want ($src) is not available, using the host address"
+        want=host; src=fallback
+      fi
+      ;;
+  esac
+
+  if [ "$persist" = 1 ] && [ "$src" != fallback ]; then net_conf_set "$conf" "$fam" "$want"; fi
+  printf -v "NET_VAL_$fam" %s "$want"
+  printf -v "NET_SRC_$fam" %s "$src"
+}
+
+net_need_pasta() {
+  if [ "$DRY_RUN" = 1 ]; then return 0; fi
+  command -v pasta >/dev/null 2>&1 || net_die "'pasta' not found (Debian/Ubuntu: apt install passt)"
+  { [ -c /dev/net/tun ] && [ -w /dev/net/tun ]; } \
+    || net_die "/dev/net/tun is missing or not writable; pasta needs it (Proxmox LXC: pct set <id> --dev0 /dev/net/tun,mode=0666, then restart the container)"
+}
+
+# net_prepare <agent> <profile>: resolve both families, log, fill NET_PREFIX/NET_BWRAP
+net_prepare() {
+  local conf v4 v6 s4 s6
+  conf="$(net_conf_file "$1" "$2")"
+  net_resolve ipv4 "${NET_FLAG_ipv4:-}" "$conf" "$1" "$2"
+  net_resolve ipv6 "${NET_FLAG_ipv6:-}" "$conf" "$1" "$2"
+  v4="$NET_VAL_ipv4"; v6="$NET_VAL_ipv6"
+
+  s4="$v4"; if [ "$v4" = host ]; then s4="$(net_default_addr ipv4)"; s4="${s4:-host}"; fi
+  s6="$v6"; if [ "$v6" = host ]; then s6="$(net_default_addr ipv6)"; s6="${s6:-host}"; fi
+  net_log "net $1/$2: ipv4=$s4 ($NET_SRC_ipv4) ipv6=$s6 ($NET_SRC_ipv6)"
+
+  NET_PREFIX=(); NET_BWRAP=()
+  if [ "$v4" = none ] && [ "$v6" = none ]; then
+    NET_BWRAP=(--unshare-net)
+  elif [ "$v4" != host ] || [ "$v6" != host ]; then
+    net_need_pasta
+    NET_PREFIX=(pasta --config-net)
+    if [ "$v6" = none ]; then NET_PREFIX+=(-4); fi
+    if [ "$v4" = none ]; then NET_PREFIX+=(-6); fi
+    case "$v4" in host|none) ;; *) NET_PREFIX+=(-o "$v4") ;; esac
+    case "$v6" in host|none) ;; *) NET_PREFIX+=(-o "$v6") ;; esac
+    NET_PREFIX+=(--)
+  fi
+}
+
+# ------------------------------------------------------------------------------
 # Sandboxed Execution (Bubblewrap)
 # ------------------------------------------------------------------------------
 run_sandbox() {
@@ -377,6 +569,8 @@ run_sandbox() {
     echo "[agent-sandbox] ERROR: Cannot locate binary for '$agent'" >&2
     exit 1
   fi
+
+  net_prepare "$agent" "$profile"
 
   # Determine profile directory
   local profile_dir
@@ -608,7 +802,10 @@ run_sandbox() {
     --setenv AGENT_SANDBOX_AGENT "$agent"
     --setenv AGENT_SANDBOX_PROFILE "$profile"
     --setenv AGENT_SANDBOX_DIR "$profile_dir"
+    --setenv AGENT_SANDBOX_IPV4 "$NET_VAL_ipv4"
+    --setenv AGENT_SANDBOX_IPV6 "$NET_VAL_ipv6"
   )
+  bwrap_args+=(${NET_BWRAP[@]+"${NET_BWRAP[@]}"})
 
   # Set agent-specific environment variables
   for ev in "${env_vars[@]}"; do
@@ -620,22 +817,21 @@ run_sandbox() {
   # Working directory
   bwrap_args+=(--chdir "$PWD")
 
-  # Optional dedicated IPv6: if SANDBOX_IPV6 is set (in $SANDBOX_BASE/net.env or AGENT_SANDBOX_NET_ENV), run inside a
-  # pasta-managed network namespace whose outbound sockets bind to that address. Side effect: the sandbox does not
-  # share the host's localhost. Without it nothing changes.
+  # Fallback dedicated IPv6: if the profile resolved to host networking and SANDBOX_IPV6 is set (in
+  # $SANDBOX_BASE/net.env or AGENT_SANDBOX_NET_ENV), run under pasta bound to that address. Per-profile settings win.
   local net_env="${AGENT_SANDBOX_NET_ENV:-$SANDBOX_BASE/net.env}"
   [ -r "$net_env" ] && . "$net_env"
-  if [ -n "${SANDBOX_IPV6:-}" ]; then
-    if ! command -v pasta >/dev/null 2>&1; then
-      echo "[agent-sandbox] ERROR: SANDBOX_IPV6 is set but 'pasta' (passt) is not installed." >&2
-      return 1
-    fi
-    exec pasta --config-net -t none -u none -T none -U none -o "$SANDBOX_IPV6" -- \
-      bwrap "${bwrap_args[@]}" "$real_bin" "${forward_args[@]}"
+  if [ ${#NET_PREFIX[@]} -eq 0 ] && [ -n "${SANDBOX_IPV6:-}" ]; then
+    net_need_pasta
+    NET_PREFIX=(pasta --config-net -t none -u none -T none -U none -o "$SANDBOX_IPV6" --)
   fi
 
-  # Execute agent binary inside Bubblewrap sandbox
-  exec bwrap "${bwrap_args[@]}" "$real_bin" "${forward_args[@]}"
+  # Execute agent binary inside Bubblewrap sandbox (net prefix = pasta, if any)
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '%s\n' ${NET_PREFIX[@]+"${NET_PREFIX[@]}"} bwrap "${bwrap_args[@]}" "$real_bin" "${forward_args[@]}"
+    exit 0
+  fi
+  exec ${NET_PREFIX[@]+"${NET_PREFIX[@]}"} bwrap "${bwrap_args[@]}" "$real_bin" "${forward_args[@]}"
 }
 
 # ------------------------------------------------------------------------------
@@ -697,6 +893,18 @@ main() {
         profile_arg="${1#--profile=}"
         shift 1
         ;;
+      --ipv4|--ipv6)
+        if [ $# -lt 2 ]; then
+          echo "[agent-sandbox] ERROR: $1 requires a value (address, host, none, new or default)" >&2
+          exit 1
+        fi
+        net_flag "$1" "$2"
+        shift 2
+        ;;
+      --ipv4=*|--ipv6=*)
+        net_flag "${1%%=*}" "${1#*=}"
+        shift 1
+        ;;
       *)
         forward_args+=("$1")
         shift 1
@@ -713,6 +921,11 @@ main() {
   # 2. Action: Run with isolated profile
   if [ -n "$profile_arg" ]; then
     run_sandbox "$canonical_agent" "$profile_arg" "${forward_args[@]}"
+  fi
+
+  if [ -n "${NET_FLAG_ipv4:-}${NET_FLAG_ipv6:-}" ]; then
+    echo "[agent-sandbox] ERROR: --ipv4/--ipv6 require --profile" >&2
+    exit 1
   fi
 
   # 3. Action: Default — run agent command directly on host with arguments
