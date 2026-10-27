@@ -87,7 +87,7 @@ check "a lone Esc quits"                        test -d "$B/claude/auth"
 keys 'j \nn\n' >/dev/null
 check "toggle, Enter, answer n: nothing removed" test -d "$B/claude/fresh"
 out="$(keys '\n')";   check "Enter with nothing selected says so"  grep -q 'Nothing selected' <<< "$out"
-out="$(keys 'an\n')"; check "n clears the selection"                grep -q 'Nothing selected' <<< "$out"
+out="$(keys 'sn\n')"; check "n clears the selection"                grep -q 'Nothing selected' <<< "$out"
 check "and nothing was removed"                 test -d "$B/claude/stale"
 
 keys 'j \ny\n' >/dev/null
@@ -96,14 +96,20 @@ mk claude fresh "$B/claude/fresh/skills/x"
 keys '\033[B\033[B\033[A \ny\n' >/dev/null
 check "arrow keys move: Down Down Up lands on row 2" test ! -e "$B/claude/fresh"
 
-keys 'a\ny\n' >/dev/null
-check "a selects every * row and they are removed" test ! -e "$B/claude/stale" -a ! -e "$B/codex/old"
+keys 's\ny\n' >/dev/null
+check "s selects every * row and they are removed" test ! -e "$B/claude/stale" -a ! -e "$B/codex/old"
 check "its saved network choice is removed"     test ! -e "$B/.net/claude/stale.conf"
 check "the hook was told to release it"         grep -qx 'release claude stale' "$T/hook.log"
 check "authenticated profiles survive a"        test -d "$B/claude/auth" -a -d "$B/codex/authed"
 
 keys ' \ny\n' >/dev/null
 check "authenticated pick: y is not enough"     test -d "$B/claude/auth"
+out="$(keys 'a\n' --dry-run)"
+rows="$(grep -c '○' <<< "$out")"; sel="$(grep -c '^  [a-z0-9]*/' <<< "$out")"
+check "a ticks every listed profile ($sel of $rows)" test "$rows" -ge 2 -a "$sel" -eq "$rows"
+out="$(keys 'a\ny\n')"
+check "a includes credentialed ones, so y is not enough" test -d "$B/claude/auth" -a -d "$B/codex/authed"
+check "the footer says what the keys do"        grep -q 'tick all' <<< "$out"
 keys ' \ndelete\n' >/dev/null
 check "authenticated pick: typing delete removes it" test ! -e "$B/claude/auth"
 keys ' j \n' --dry-run >/dev/null

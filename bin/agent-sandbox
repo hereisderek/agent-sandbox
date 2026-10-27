@@ -81,8 +81,8 @@ USAGE:
       choice and reserved address. Lists them and asks first; --dry-run only
       lists, --yes skips the question. Authenticated profiles are never touched.
       -i/--interactive instead shows a checkbox list of ALL profiles (* marks what
-      would be auto-cleaned): arrows move, space toggles, a selects every *, enter
-      removes, q quits. Picking a profile with credentials needs the word 'delete'.
+      would be auto-cleaned): arrows move, space ticks, a ticks all, s ticks every *,
+      enter removes the ticked ones, q quits. Picking a profile with credentials needs the word 'delete'.
 
 SUPPORTED AGENTS & ALIASES:
   antigravity, agy    -> Google Antigravity CLI
@@ -413,7 +413,7 @@ remove_profile() {
 }
 
 # clean_interactive <agent|all> <days> <dry_run>: checkbox list of profiles to remove.
-#   up/down or k/j move   space toggles   a selects every * row   n clears   enter runs   q or Esc quits
+#   up/down or k/j move   space toggles   a selects all   s selects every * row   n clears   enter runs   q or Esc quits
 # Keys are read from stdin one at a time (a terminal is not required). Any profile can be
 # picked; ones with credentials need the word "delete" typed. * marks what --auto-clean removes.
 clean_interactive() {
@@ -443,7 +443,10 @@ clean_interactive() {
       dot="○"; case "$chosen" in *" $i "*) dot="●" ;; esac
       printf '%s %s %s %-12s %-20s %-14s %s\n' "$cur" "$dot" "$mark" "$ag" "$p_name" "$st" "${nets[$((i - 1))]}"
     done
-    echo "↑/↓ move  space select  a all *  n none  enter remove  q quit"
+    local count=0 c
+    for c in $chosen; do count=$((count + 1)); done
+    echo "[↑/↓] move   [space] tick/untick   [a] tick all   [s] tick stale (*)   [n] untick all"
+    echo "[enter] remove ticked profiles ($count ticked)   [q] quit, remove nothing"
   }
   echo "Profiles under $SANDBOX_BASE.  * = not authenticated and unused $days+ days (what --auto-clean removes)"
   # the cursor is hidden while picking and restored on any exit; redraw in place only on a terminal
@@ -457,12 +460,13 @@ clean_interactive() {
       k) [ "$pos" -gt 1 ] && pos=$((pos - 1)) ;;
       j) [ "$pos" -lt "$n" ] && pos=$((pos + 1)) ;;
       " ") case "$chosen" in *" $pos "*) chosen="${chosen/ $pos / }" ;; *) chosen+="$pos " ;; esac ;;
-      a) i=0; for row in "${rows[@]}"; do i=$((i + 1)); case "$row" in *"|*|"*) case "$chosen" in *" $i "*) ;; *) chosen+="$i " ;; esac ;; esac; done ;;
+      a) chosen=" "; for ((i = 1; i <= n; i++)); do chosen+="$i "; done ;;
+      s) i=0; for row in "${rows[@]}"; do i=$((i + 1)); case "$row" in *"|*|"*) case "$chosen" in *" $i "*) ;; *) chosen+="$i " ;; esac ;; esac; done ;;
       n) chosen=" " ;;
       q|Q) return 0 ;;
       "") break ;;
     esac
-    [ "$tty" = 1 ] && printf '\033[%dA\033[J' $((n + 1)) && draw
+    [ "$tty" = 1 ] && printf '\033[%dA\033[J' $((n + 2)) && draw
   done
   if [ "$tty" = 1 ]; then printf '\033[?25h'; fi
   if [ "$chosen" = " " ]; then echo "Nothing selected."; return 0; fi
