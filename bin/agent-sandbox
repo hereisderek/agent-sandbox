@@ -353,14 +353,11 @@ list_profiles() {
   done
   echo "+-------------+----------------------+----------+-------------------+----------------+-------------------------------------------------------------+"
 
-  # Saved per-profile network choices (see --ipv4/--ipv6)
-  local net_hdr=0 r_conf
+  # Outbound address each profile uses (see --ipv4/--ipv6)
+  echo "Network:"
   for row in "${rows[@]}"; do
     IFS='|' read -r r_ag r_name _ <<< "$row"
-    r_conf="$(net_conf_file "$r_ag" "$r_name")"
-    [ -s "$r_conf" ] || continue
-    if [ "$net_hdr" -eq 0 ]; then echo "Network overrides:"; net_hdr=1; fi
-    printf '  %s/%s: %s\n' "$r_ag" "$r_name" "$(tr '\n' ' ' < "$r_conf")"
+    printf '  %s/%s: %s\n' "$r_ag" "$r_name" "$(net_describe "$r_ag" "$r_name")"
   done
 }
 
@@ -389,7 +386,10 @@ auto_clean() {
     return 0
   fi
   echo "Unauthenticated profiles unused for $days+ days:"
-  for v in "${victims[@]}"; do IFS='|' read -r ag p_name p_path <<< "$v"; printf '  %s/%s  (%s)\n' "$ag" "$p_name" "$p_path"; done
+  for v in "${victims[@]}"; do
+    IFS='|' read -r ag p_name p_path <<< "$v"
+    printf '  %s/%s  (%s)\n      %s\n' "$ag" "$p_name" "$p_path" "$(net_describe "$ag" "$p_name")"
+  done
   [ "$dry" = 1 ] && return 0
 
   if [ "$yes" != 1 ]; then
@@ -432,6 +432,8 @@ clean_interactive() {
   done
   n=${#rows[@]}
   if [ "$n" -eq 0 ]; then echo "No profiles found under $SANDBOX_BASE/."; return 0; fi
+  local nets=()   # one display line per row, computed once so redraws stay instant
+  for row in "${rows[@]}"; do IFS='|' read -r ag p_name _ <<< "$row"; nets+=("$(net_describe "$ag" "$p_name")"); done
 
   draw() {
     i=0
@@ -439,11 +441,11 @@ clean_interactive() {
       i=$((i + 1)); IFS='|' read -r ag p_name st mark p_path <<< "$row"
       cur=" "; [ "$i" -eq "$pos" ] && cur=">"
       dot="○"; case "$chosen" in *" $i "*) dot="●" ;; esac
-      printf '%s %s %s %-12s %-20s %-14s %s\n' "$cur" "$dot" "$mark" "$ag" "$p_name" "$st" "$p_path"
+      printf '%s %s %s %-12s %-20s %-14s %s\n' "$cur" "$dot" "$mark" "$ag" "$p_name" "$st" "${nets[$((i - 1))]}"
     done
     echo "↑/↓ move  space select  a all *  n none  enter remove  q quit"
   }
-  echo "* = not authenticated and unused $days+ days (what --auto-clean removes)"
+  echo "Profiles under $SANDBOX_BASE.  * = not authenticated and unused $days+ days (what --auto-clean removes)"
   # the cursor is hidden while picking and restored on any exit; redraw in place only on a terminal
   if [ "$tty" = 1 ]; then printf '\033[?25l'; trap 'printf "\033[?25h"' EXIT; trap 'exit 130' INT TERM; fi
   draw
@@ -598,6 +600,29 @@ net_default_addr() {
   local fam=-4 dst=1.1.1.1
   if [ "$1" = ipv6 ]; then fam=-6; dst=2606:4700:4700::1111; fi
   ip "$fam" route get "$dst" 2>/dev/null | sed -n 's/.* src \([^ ]*\).*/\1/p' | head -n 1 || true
+}
+
+# net_describe <agent> <profile>: the address each family would use, for display only.
+# Same order as a launch (saved choice, then default policy) but never reserves or writes.
+# e.g. "ipv4=172.16.2.26 (host)  ipv6=2404:4400:4172:e900:ffff:ffff:ffff:ff3a (saved)"
+net_describe() {
+  local fam v src out="" saved
+  for fam in ipv4 ipv6; do
+    saved="$(net_norm "$fam" "$(net_conf_get "$(net_conf_file "$1" "$2")" "$fam")" 2>/dev/null || true)"
+    case "$saved" in ""|new|default) saved="" ;; esac
+    if [ -n "$saved" ]; then v="$saved"; src=saved
+    else v="$(net_policy "$fam" 2>/dev/null)"; src="default policy"
+    fi
+    case "$v" in
+      host) v="$(net_default_addr "$fam")"; if [ -n "$v" ]; then src=host; else v=host; src=""; fi ;;
+      new)  src="reserved on first launch" ;;
+      none) ;;
+      *)    # an address that is not on this host will fall back to the host address at launch
+            if command -v ip >/dev/null 2>&1 && ! net_present "$v"; then src+=", not on this host"; fi ;;
+    esac
+    out+="${out:+  }$fam=$v${src:+ ($src)}"
+  done
+  printf '%s' "$out"
 }
 
 # net_resolve <family> <flag> <conf> <agent> <profile>

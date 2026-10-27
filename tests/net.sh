@@ -158,4 +158,23 @@ AGENT_SANDBOX_DEFAULT_IPV6=host run cf2
 hasnline "env beats file"       "$out" pasta
 rm -f "$T/base/.net/defaults.conf"
 
+# 14. listings show the address each profile uses, and never reserve or save anything
+C="$T/base/.net/claude"; mkdir -p "$C"
+for n in plain pinned gone off; do mkdir -p "$T/base/claude/ls-$n"; done
+echo "$A6" > "$T/present"
+echo "ipv6=$A6" > "$C/ls-pinned.conf"
+echo "ipv6=$B6" > "$C/ls-gone.conf"            # saved, but not on this host
+echo "ipv4=none" > "$C/ls-off.conf"
+listing="$("$ROOT/bin/agent-sandbox" claude --list-profile 2>&1)"
+has      "list: network block"      "$listing" "Network:"
+has      "list: host address"       "$listing" "claude/ls-plain: ipv4=172.16.2.26 (host)  ipv6=2404:4400:4172:e900::26 (host)"
+has      "list: saved address"      "$listing" "claude/ls-pinned: ipv4=172.16.2.26 (host)  ipv6=$A6 (saved)"
+has      "list: saved but missing"  "$listing" "claude/ls-gone: ipv4=172.16.2.26 (host)  ipv6=$B6 (saved, not on this host)"
+has      "list: disabled family"    "$listing" "claude/ls-off: ipv4=none (saved)"
+AGENT_SANDBOX_DEFAULT_IPV6=new "$ROOT/bin/agent-sandbox" claude --list-profile 2>&1 | grep -qF "claude/ls-plain: ipv4=172.16.2.26 (host)  ipv6=new (reserved on first launch)" \
+  && ok "list: policy new shown as pending" || bad "list: policy new shown as pending"
+[ ! -e "$C/ls-plain.conf" ] && ok "list: reserved and saved nothing" || bad "list: reserved and saved nothing"
+cl="$("$ROOT/bin/agent-sandbox" --auto-clean --dry-run --days 0 2>&1)"
+has      "auto-clean: shows the address" "$cl" "ipv6=$B6 (saved, not on this host)"
+
 exit $fail

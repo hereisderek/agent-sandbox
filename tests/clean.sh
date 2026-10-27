@@ -75,6 +75,7 @@ keys() { printf "$1" | "$SB" --auto-clean -i "${@:2}" 2>&1; }
 out="$(keys q)"
 check "lists all five profiles, none selected"  bash -c "[ \$(grep -c '○' <<< '$out') -eq 5 ]"
 check "the cursor starts on the first row"      grep -qE '^> ○   claude +auth' <<< "$out"
+check "rows show the network info"              grep -qE 'claude +stale .*ipv4=.* ipv6=' <<< "$out"
 check "flagged rows carry a *"                  grep -qE '○ \* claude +stale' <<< "$out"
 check "authenticated rows are not flagged"      bash -c "! grep -qE '○ \* +(claude +auth|codex +authed)' <<< '$out'"
 check "q removes nothing"                       test -d "$B/claude/stale"
